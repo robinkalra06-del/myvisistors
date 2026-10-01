@@ -1,6 +1,6 @@
 /**
  * VisitorPulse Intelligence & Live Chatbot Widget
- * Enterprise Edition - Lightweight, zero external dependencies, no permissions requested.
+ * Enterprise Edition - Zero permissions, zero external dependencies, robust multi-transport delivery.
  */
 (function () {
   'use strict';
@@ -8,26 +8,52 @@
   if (window.__VISITOR_PULSE_INITIALIZED__) return;
   window.__VISITOR_PULSE_INITIALIZED__ = true;
 
-  // Determine server origin from currentScript
+  // Determine script tag and server origin
   var currentScript = document.currentScript || (function () {
     var scripts = document.getElementsByTagName('script');
+    for (var i = scripts.length - 1; i >= 0; i--) {
+      if (scripts[i].src && scripts[i].src.indexOf('tracker.js') !== -1) {
+        return scripts[i];
+      }
+    }
     return scripts[scripts.length - 1];
   })();
 
   var scriptSrc = currentScript ? currentScript.src : '';
   var serverOrigin = '';
-  try {
-    var parsedUrl = new URL(scriptSrc);
-    serverOrigin = parsedUrl.origin;
-  } catch (e) {
-    serverOrigin = window.location.origin;
+
+  // Check explicit data attributes first
+  if (currentScript) {
+    serverOrigin = currentScript.getAttribute('data-server') || 
+                   currentScript.getAttribute('data-host') || '';
   }
 
+  // Parse from script tag src
+  if (!serverOrigin && scriptSrc) {
+    try {
+      var parsedUrl = new URL(scriptSrc, window.location.href);
+      serverOrigin = parsedUrl.origin;
+    } catch (e) {}
+  }
+
+  // Global window override or fallback
+  if (!serverOrigin || serverOrigin === 'null') {
+    serverOrigin = window.VisitorPulseHost || window.location.origin;
+  }
+
+  // Strip trailing slashes
+  serverOrigin = serverOrigin.replace(/\/+$/, '');
+
   var siteId = (currentScript && currentScript.getAttribute('data-site-id')) || 'production';
-  // Check if chatbot should be hidden on mobile devices (as requested)
+  // Option: hide chat bot on mobile devices (only if explicitly set to "true")
   var hideBotOnMobile = (currentScript && currentScript.getAttribute('data-hide-mobile') === 'true') || false;
 
   var apiBase = serverOrigin + '/api';
+
+  // Mixed Content Diagnostics
+  if (window.location.protocol === 'https:' && serverOrigin.indexOf('http://') === 0) {
+    console.warn('[VisitorPulse] ⚠️ Mixed Content Warning: This website is served over HTTPS (' + window.location.origin + '), but the tracker server is on plain HTTP (' + serverOrigin + '). Mobile browsers (iOS Safari, Android Chrome) block plain HTTP requests from HTTPS sites. To track mobile visitors and eliminate browser warnings, connect tracker.js to an HTTPS URL or tunnel.');
+  }
 
   function generateUUID() {
     if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -68,7 +94,7 @@
     return params;
   }
 
-  // Determine device details
+  // Accurate device detection
   function getDeviceDetails() {
     var ua = navigator.userAgent || '';
     var isMobile = /mobile|iphone|ipod|android/i.test(ua) || (window.innerWidth <= 768);
@@ -86,7 +112,7 @@
     return {
       device: deviceType,
       deviceDetail: deviceDetail,
-      isMobileScreen: isMobile
+      isMobile: isMobile
     };
   }
 
@@ -116,31 +142,8 @@
   var currentPagePath = window.location.pathname + window.location.search;
   var currentPageTitle = document.title;
   var lastUserInteraction = Date.now();
-  var clientPublicIp = null;
-  var clientGeo = null;
   var utmParams = getUtmParams();
   var deviceMeta = getDeviceDetails();
-
-  // Resolve Real Public IP Client-Side (Non-blocking, 0 permissions)
-  function resolvePublicIpClientSide(callback) {
-    var timeout = setTimeout(function () {
-      if (callback) callback();
-    }, 2000);
-
-    fetch('https://api.ipify.org?format=json')
-      .then(function (res) { return res.json(); })
-      .then(function (data) {
-        clearTimeout(timeout);
-        if (data && data.ip) {
-          clientPublicIp = data.ip;
-        }
-        if (callback) callback();
-      })
-      .catch(function () {
-        clearTimeout(timeout);
-        if (callback) callback();
-      });
-  }
 
   function getClientMeta() {
     return {
@@ -152,29 +155,46 @@
     };
   }
 
+  // Robust multi-transport delivery (Simple Request - avoids CORS preflights and PNA popups)
   function sendPayload(endpoint, data, useBeacon) {
     var payloadString = JSON.stringify(data);
     var targetUrl = apiBase + endpoint;
 
+    // 1. SendBeacon if page unloading
     if (useBeacon && navigator.sendBeacon) {
       try {
-        var blob = new Blob([payloadString], { type: 'application/json' });
+        var blob = new Blob([payloadString], { type: 'text/plain;charset=UTF-8' });
         if (navigator.sendBeacon(targetUrl, blob)) {
           return;
         }
       } catch (err) {}
     }
 
+    // 2. Fetch with text/plain (CORS Simple Request - No OPTIONS preflight triggered)
     try {
       fetch(targetUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         body: payloadString,
+        mode: 'cors',
+        credentials: 'omit',
         keepalive: !!useBeacon
-      }).catch(function () {});
-    } catch (e) {}
+      }).catch(function () {
+        // 3. Fallback using Image Pixel (works everywhere, even when fetch is restricted)
+        try {
+          var img = new Image();
+          img.src = targetUrl + '?data=' + encodeURIComponent(payloadString) + '&_t=' + Date.now();
+        } catch (e) {}
+      });
+    } catch (e) {
+      try {
+        var img2 = new Image();
+        img2.src = targetUrl + '?data=' + encodeURIComponent(payloadString) + '&_t=' + Date.now();
+      } catch (e) {}
+    }
   }
 
+  // Track pageview immediately
   function trackPageView(isNavigation) {
     pageStartTime = Date.now();
     currentPageUrl = window.location.href;
@@ -192,8 +212,6 @@
       referrer: document.referrer || '',
       isNavigation: !!isNavigation,
       utm: utmParams,
-      clientPublicIp: clientPublicIp,
-      clientGeo: clientGeo,
       meta: getClientMeta(),
       timestamp: Date.now()
     };
@@ -201,6 +219,7 @@
     sendPayload('/track', payload, false);
   }
 
+  // Send Heartbeat every 5s
   function sendHeartbeat() {
     var nowTime = Date.now();
     var tabVisible = document.visibilityState === 'visible';
@@ -255,7 +274,7 @@
     }
   });
 
-  // SPA Route interceptors
+  // SPA Route changes
   function hookHistory() {
     var pushState = history.pushState;
     if (pushState) {
@@ -305,8 +324,10 @@
   function initChatbotWidget() {
     var isMobile = (window.innerWidth <= 768) || /mobile|android|iphone|ipad/i.test(navigator.userAgent || '');
     
-    // If hideOnMobile is requested AND user is on mobile, do not inject widget
+    // If hideOnMobile is requested AND user is on mobile, DO NOT render the chat widget!
+    // Mobile visitors will have a 100% clean view of the page, while still being tracked!
     if (hideBotOnMobile && isMobile) {
+      console.log('[VisitorPulse] Chat widget hidden on mobile (data-hide-mobile="true"). Visitor telemetry remains 100% active.');
       return;
     }
 
@@ -349,6 +370,7 @@
         background-color: #10b981;
         border: 2px solid #ffffff;
         border-radius: 50%;
+        display: none;
       }
       #vp-chat-window {
         position: fixed;
@@ -376,6 +398,23 @@
       }
       #vp-chat-window.vp-open {
         display: flex;
+      }
+      @media (max-width: 600px) {
+        #vp-chat-launcher {
+          bottom: 16px;
+          right: 16px;
+          width: 50px;
+          height: 50px;
+        }
+        #vp-chat-window {
+          bottom: 76px;
+          right: 12px;
+          left: 12px;
+          width: auto;
+          max-width: none;
+          height: 72vh;
+          max-height: calc(100vh - 100px);
+        }
       }
       .vp-chat-header {
         padding: 14px 18px;
@@ -519,7 +558,6 @@
     `;
     document.head.appendChild(style);
 
-    // Create launcher button
     var launcher = document.createElement('button');
     launcher.id = 'vp-chat-launcher';
     launcher.setAttribute('aria-label', 'Open support chat');
@@ -528,7 +566,6 @@
       <div id="vp-chat-unread"></div>
     `;
 
-    // Create chat window
     var chatWindow = document.createElement('div');
     chatWindow.id = 'vp-chat-window';
     chatWindow.innerHTML = `
@@ -578,7 +615,6 @@
       chatWindow.classList.remove('vp-open');
     });
 
-    // Chat messaging
     function appendMessage(text, type) {
       var body = document.getElementById('vp-chat-body');
       var div = document.createElement('div');
@@ -593,7 +629,6 @@
       var trimmed = text.trim();
       appendMessage(trimmed, 'user');
 
-      // Send to server
       sendPayload('/chat/send', {
         sessionId: sessionId,
         visitorId: visitorId,
@@ -602,13 +637,12 @@
         timestamp: Date.now()
       }, false);
 
-      // Automated helpful instant response if user uses common inquiries
       setTimeout(function () {
         var lower = trimmed.toLowerCase();
         if (lower.includes('price') || lower.includes('cost') || lower.includes('pricing')) {
           appendMessage('Our plans start with transparent pricing and customizable tiers. An agent has also been notified of your inquiry!', 'bot');
         } else if (lower.includes('service') || lower.includes('product') || lower.includes('offer')) {
-          appendMessage('We provide real-time cloud analytics, live presence telemetry, and instant visitor intelligence. Let us know what specific features you need!', 'bot');
+          appendMessage('We provide real-time presence telemetry and instant visitor intelligence. Let us know what specific questions you have!', 'bot');
         } else if (lower.includes('contact') || lower.includes('support') || lower.includes('help')) {
           appendMessage('Our support team is online and has received your message. Someone will reply shortly right here in this chat!', 'bot');
         } else {
@@ -630,18 +664,18 @@
       }
     });
 
-    // Prompt chips click
     document.querySelectorAll('.vp-chip').forEach(function (chip) {
       chip.addEventListener('click', function () {
-        var promptText = this.getAttribute('data-prompt');
-        sendMessage(promptText);
+        sendMessage(this.getAttribute('data-prompt'));
       });
     });
 
     // Poll for admin replies every 4s
     var lastCheckedMsgCount = 0;
     setInterval(function () {
-      fetch(apiBase + '/chat/history?sessionId=' + encodeURIComponent(sessionId))
+      fetch(apiBase + '/chat/history?sessionId=' + encodeURIComponent(sessionId), {
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
+      })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (data && data.messages && data.messages.length > lastCheckedMsgCount) {
@@ -661,22 +695,22 @@
     }, 4000);
   }
 
-  // Startup initialization
-  resolvePublicIpClientSide(function () {
-    trackPageView(false);
-    hookHistory();
-    setInterval(sendHeartbeat, 5000);
+  // IMMEDIATELY FIRE initial tracking event (Never delays or waits for external APIs)
+  trackPageView(false);
+  hookHistory();
+  setInterval(sendHeartbeat, 5000);
 
-    // Initialize chatbot widget when DOM is ready
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initChatbotWidget);
-    } else {
-      initChatbotWidget();
-    }
-  });
+  // Initialize chatbot widget when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initChatbotWidget);
+  } else {
+    initChatbotWidget();
+  }
 
   window.VisitorPulse = {
     getVisitorId: function () { return visitorId; },
     getSessionId: function () { return sessionId; }
   };
+
+  console.log('[VisitorPulse] ⚡ Telemetry Active. Visitor: ' + visitorId + ' | Server: ' + serverOrigin);
 })();
