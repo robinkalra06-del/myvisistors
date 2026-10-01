@@ -7,11 +7,26 @@
 const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const PORT = process.env.PORT || 3030;
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || '0.0.0.0';
+
+function getLocalIp() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return '127.0.0.1';
+}
+const LOCAL_IP = getLocalIp();
+
 const DB_FILE = path.join(__dirname, 'analytics.db');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
@@ -626,7 +641,11 @@ function calculateLiveStats() {
     devices: deviceCount,
     browsers: browserCount,
     isps: Object.entries(ispCount).map(([isp, count]) => ({ isp, count })).sort((a,b) => b.count - a.count).slice(0, 5),
-    timestamp: Date.now()
+    timestamp: Date.now(),
+    serverInfo: {
+      port: PORT,
+      localIp: LOCAL_IP
+    }
   };
 }
 
@@ -665,14 +684,42 @@ const MIME_TYPES = {
   '.csv': 'text/csv; charset=utf-8'
 };
 
+const TRANSPARENT_GIF_PIXEL = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+
+function sendTrackingResponse(res, reqMethod) {
+  if (reqMethod === 'GET') {
+    res.writeHead(200, {
+      'Content-Type': 'image/gif',
+      'Content-Length': TRANSPARENT_GIF_PIXEL.length,
+      'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Private-Network': 'true'
+    });
+    res.end(TRANSPARENT_GIF_PIXEL);
+  } else {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Private-Network': 'true'
+    });
+    res.end(JSON.stringify({ success: true }));
+  }
+}
+
 const server = http.createServer(async (req, res) => {
-  // CORS Headers for embeddability from any domain
+  // CORS & Chrome Private Network Access Headers
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Access-Control-Request-Private-Network');
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204);
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Private-Network': 'true',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Access-Control-Request-Private-Network'
+    });
     res.end();
     return;
   }
@@ -687,7 +734,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive'
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
     });
 
     res.write('event: connected\ndata: {"status":"connected"}\n\n');
@@ -705,12 +753,21 @@ const server = http.createServer(async (req, res) => {
   // ------------------------------------------
   // API: Track Pageview / Navigation
   // ------------------------------------------
-  if (pathname === '/api/track' && req.method === 'POST') {
+  if (pathname === '/api/track' && (req.method === 'POST' || req.method === 'GET')) {
     try {
-      const data = await parseRequestBody(req);
+      let data = {};
+      if (req.method === 'POST') {
+        data = await parseRequestBody(req);
+      } else {
+        const raw = url.searchParams.get('data');
+        data = raw ? JSON.parse(raw) : {};
+      }
       const { visitorId, sessionId, url: pageUrl, pathname: pagePath, title, referrer, isNavigation, meta, utm, clientPublicIp, clientGeo, timestamp } = data;
 
       if (!visitorId || !sessionId) {
+        if (req.method === 'GET') {
+          return sendTrackingResponse(res, 'GET');
+        }
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing visitorId or sessionId' }));
         return;
@@ -824,8 +881,7 @@ const server = http.createServer(async (req, res) => {
 
       broadcastStats();
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true }));
+      return sendTrackingResponse(res, req.method);
     } catch (err) {
       console.error('Error tracking pageview:', err);
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -837,9 +893,15 @@ const server = http.createServer(async (req, res) => {
   // ------------------------------------------
   // API: Heartbeat
   // ------------------------------------------
-  if (pathname === '/api/heartbeat' && req.method === 'POST') {
+  if (pathname === '/api/heartbeat' && (req.method === 'POST' || req.method === 'GET')) {
     try {
-      const data = await parseRequestBody(req);
+      let data = {};
+      if (req.method === 'POST') {
+        data = await parseRequestBody(req);
+      } else {
+        const raw = url.searchParams.get('data');
+        data = raw ? JSON.parse(raw) : {};
+      }
       const { sessionId, status, timeOnPageSeconds } = data;
       const now = Date.now();
 
@@ -860,8 +922,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true }));
+      return sendTrackingResponse(res, req.method);
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
@@ -872,9 +933,15 @@ const server = http.createServer(async (req, res) => {
   // ------------------------------------------
   // API: Leave
   // ------------------------------------------
-  if (pathname === '/api/leave' && req.method === 'POST') {
+  if (pathname === '/api/leave' && (req.method === 'POST' || req.method === 'GET')) {
     try {
-      const data = await parseRequestBody(req);
+      let data = {};
+      if (req.method === 'POST') {
+        data = await parseRequestBody(req);
+      } else {
+        const raw = url.searchParams.get('data');
+        data = raw ? JSON.parse(raw) : {};
+      }
       const { sessionId, durationSeconds, pathname: leavePath } = data;
       const now = Date.now();
 
@@ -899,8 +966,7 @@ const server = http.createServer(async (req, res) => {
         broadcastStats();
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true }));
+      return sendTrackingResponse(res, req.method);
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
@@ -1065,10 +1131,10 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`\n======================================================`);
   console.log(`⚡ Realtime Visitor Monitor - Enterprise Edition`);
-  console.log(`   - Privacy Mode:     Strict Loopback (${HOST}) [Isolated & Private]`);
-  console.log(`   - Live Dashboard:   http://${HOST}:${PORT}/`);
-  console.log(`   - Embed Script:      http://${HOST}:${PORT}/tracker.js`);
-  console.log(`   - SQLite Database:   ${DB_FILE}`);
+  console.log(`   - Live Dashboard:   http://localhost:${PORT}/`);
+  console.log(`   - Mobile & LAN URL: http://${LOCAL_IP}:${PORT}/ (for mobile devices)`);
+  console.log(`   - Embed Script:     http://${LOCAL_IP}:${PORT}/tracker.js`);
+  console.log(`   - SQLite Database:  ${DB_FILE}`);
   console.log(`======================================================\n`);
 });
 
