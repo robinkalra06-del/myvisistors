@@ -61,7 +61,7 @@ export default function RootLayout({ children }) {
       <body>
         {children}
         <Script
-          src="https://your-tracker-domain.com/tracker.js"
+          src="https://myvisistors.vercel.app/tracker.js"
           data-site-id="production-web"
           strategy="afterInteractive"
         />
