@@ -61,7 +61,7 @@ export default function RootLayout({ children }) {
       <body>
         {children}
         <Script
-          src="https://myvisistors.vercel.app/tracker.js"
+          src="https://myvisistors-1.onrender.com/tracker.js"
           data-site-id="production-web"
           strategy="afterInteractive"
         />

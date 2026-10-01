@@ -1547,7 +1547,7 @@
       const localHost = (window.__SERVER_INFO__ && window.__SERVER_INFO__.localIp) ? window.__SERVER_INFO__.localIp : '192.168.1.22';
       const port = (window.__SERVER_INFO__ && window.__SERVER_INFO__.port) ? window.__SERVER_INFO__.port : 3030;
 
-      const tunnelSnippet = `<!-- VisitorPulse Real-Time Telemetry & Live Chatbot (Public HTTPS) -->\n<!-- Zero browser popups, 100% Mobile & Desktop tracking everywhere -->\n<script src="${isHttps ? origin : 'https://myvisistors.vercel.app'}/tracker.js" data-site-id="production" data-hide-mobile="true" async><\/script>`;
+      const tunnelSnippet = `<!-- VisitorPulse Real-Time Telemetry & Live Chatbot (Public HTTPS) -->\n<!-- Zero browser popups, 100% Mobile & Desktop tracking everywhere -->\n<script src="${isHttps ? origin : 'https://myvisistors-1.onrender.com'}/tracker.js" data-site-id="production" data-hide-mobile="true" async><\/script>`;
       const localSnippet = `<!-- VisitorPulse Real-Time Telemetry (Local Wi-Fi Network) -->\n<script src="http://${localHost}:${port}/tracker.js" data-site-id="production" data-hide-mobile="true" async><\/script>`;
 
       document.getElementById('snippetCodeTunnel').textContent = tunnelSnippet;
