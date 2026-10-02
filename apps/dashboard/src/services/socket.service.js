@@ -1,5 +1,6 @@
 import { io } from 'socket.io-client';
 import { SOCKET_EVENTS } from '@livetrack/shared';
+import { getApiBase } from './api.js';
 
 let socketInstance = null;
 let currentWebsiteId = null;
@@ -10,7 +11,7 @@ export const socketService = {
       return socketInstance;
     }
 
-    const socketUrl = import.meta.env.VITE_API_URL || window.location.origin;
+    const socketUrl = getApiBase() || window.location.origin;
 
     socketInstance = io(socketUrl, {
       auth: { token: token || localStorage.getItem('livetrack_token') },
