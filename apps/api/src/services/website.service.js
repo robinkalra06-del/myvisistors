@@ -96,6 +96,7 @@ export class WebsiteService {
 
     const website = await db.website.create({
       data: {
+        id: publicId,
         publicId,
         organizationId: org.id,
         name,

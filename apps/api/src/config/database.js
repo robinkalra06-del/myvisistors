@@ -455,7 +455,14 @@ class DatabaseProxy {
         const rows = this.query('SELECT * FROM Website WHERE id = ? OR publicId = ? LIMIT 1', [where.id || '', where.publicId || '']);
         return rows[0] || null;
       },
-      findFirst: async ({ where = {} }) => {
+      findFirst: async ({ where = {} } = {}) => {
+        if (where.OR && Array.isArray(where.OR)) {
+          for (const cond of where.OR) {
+            const found = await this.website.findFirst({ where: cond });
+            if (found) return found;
+          }
+          return null;
+        }
         if (where.id && where.publicId) {
           const rows = this.query('SELECT * FROM Website WHERE id = ? OR publicId = ? LIMIT 1', [where.id, where.publicId]);
           return rows[0] || null;
@@ -468,8 +475,11 @@ class DatabaseProxy {
           const rows = this.query('SELECT * FROM Website WHERE id = ? LIMIT 1', [where.id]);
           return rows[0] || null;
         }
-        const rows = this.query('SELECT * FROM Website LIMIT 1');
-        return rows[0] || null;
+        if (where.organizationId) {
+          const rows = this.query('SELECT * FROM Website WHERE organizationId = ? LIMIT 1', [where.organizationId]);
+          return rows[0] || null;
+        }
+        return null;
       },
       findMany: async ({ where = {} }) => {
         if (where.organizationId) {
@@ -511,15 +521,13 @@ class DatabaseProxy {
         return this.website.findUnique({ where });
       },
       delete: async ({ where }) => {
-        const target = await this.website.findUnique({ where });
-        if (target) {
-          this.run('DELETE FROM Website WHERE id = ?', [target.id]);
-          this.run('DELETE FROM TrackingKey WHERE websiteId = ?', [target.id]);
-          this.run('DELETE FROM Visitor WHERE websiteId = ?', [target.id]);
-          this.run('DELETE FROM VisitorSession WHERE websiteId = ?', [target.id]);
-          this.run('DELETE FROM PageView WHERE websiteId = ?', [target.id]);
-          this.run('DELETE FROM VisitorEvent WHERE websiteId = ?', [target.id]);
-        }
+        const targetId = where.id || where.publicId || '';
+        this.run('DELETE FROM Website WHERE id = ? OR publicId = ?', [targetId, targetId]);
+        this.run('DELETE FROM TrackingKey WHERE websiteId = ?', [targetId]);
+        this.run('DELETE FROM Visitor WHERE websiteId = ?', [targetId]);
+        this.run('DELETE FROM VisitorSession WHERE websiteId = ?', [targetId]);
+        this.run('DELETE FROM PageView WHERE websiteId = ?', [targetId]);
+        this.run('DELETE FROM VisitorEvent WHERE websiteId = ?', [targetId]);
         return { success: true };
       }
     };
@@ -558,6 +566,12 @@ class DatabaseProxy {
       update: async ({ where, data }) => {
         this.run('UPDATE TrackingKey SET isRevoked = ?, updatedAt = ? WHERE id = ? OR websiteId = ?', [data.isRevoked ? 1 : 0, new Date().toISOString(), where.id || '', where.websiteId || '']);
         return { success: true };
+      },
+      deleteMany: async ({ where = {} } = {}) => {
+        if (where.websiteId) {
+          this.run('DELETE FROM TrackingKey WHERE websiteId = ?', [where.websiteId]);
+        }
+        return { count: 1 };
       }
     };
   }
@@ -629,6 +643,12 @@ class DatabaseProxy {
         params.push(where.id);
         this.run(`UPDATE Visitor SET ${updates.join(', ')} WHERE id = ?`, params);
         return this.visitor.findUnique({ where });
+      },
+      deleteMany: async ({ where = {} } = {}) => {
+        if (where.websiteId) {
+          this.run('DELETE FROM Visitor WHERE websiteId = ?', [where.websiteId]);
+        }
+        return { count: 1 };
       }
     };
   }
@@ -736,6 +756,12 @@ class DatabaseProxy {
         params.push(where.sessionToken || where.id || '');
         this.run(`UPDATE VisitorSession SET ${updates.join(', ')} WHERE id = ? OR sessionToken = ?`, params);
         return this.visitorSession.findUnique({ where });
+      },
+      deleteMany: async ({ where = {} } = {}) => {
+        if (where.websiteId) {
+          this.run('DELETE FROM VisitorSession WHERE websiteId = ?', [where.websiteId]);
+        }
+        return { count: 1 };
       }
     };
   }
@@ -784,6 +810,12 @@ class DatabaseProxy {
           data.durationSeconds || 0, data.timestamp || now
         ]);
         return { id, ...data, timestamp: data.timestamp || now };
+      },
+      deleteMany: async ({ where = {} } = {}) => {
+        if (where.websiteId) {
+          this.run('DELETE FROM PageView WHERE websiteId = ?', [where.websiteId]);
+        }
+        return { count: 1 };
       }
     };
   }
@@ -832,6 +864,12 @@ class DatabaseProxy {
           data.timestamp || now
         ]);
         return { id, ...data, timestamp: data.timestamp || now };
+      },
+      deleteMany: async ({ where = {} } = {}) => {
+        if (where.websiteId) {
+          this.run('DELETE FROM VisitorEvent WHERE websiteId = ?', [where.websiteId]);
+        }
+        return { count: 1 };
       }
     };
   }
@@ -865,6 +903,27 @@ class DatabaseProxy {
       update: async ({ where, data }) => {
         this.run('UPDATE Notification SET isRead = ? WHERE id = ?', [data.isRead ? 1 : 0, where.id]);
         return { success: true };
+      },
+      findFirst: async ({ where = {} } = {}) => {
+        let sql = 'SELECT * FROM Notification WHERE 1=1';
+        const params = [];
+        if (where.userId) {
+          sql += ' AND userId = ?';
+          params.push(where.userId);
+        }
+        if (where.type) {
+          sql += ' AND type = ?';
+          params.push(where.type);
+        }
+        sql += ' LIMIT 1';
+        const rows = this.query(sql, params);
+        return rows[0] || null;
+      },
+      deleteMany: async ({ where = {} } = {}) => {
+        if (where.websiteId) {
+          this.run('DELETE FROM Notification WHERE websiteId = ?', [where.websiteId]);
+        }
+        return { count: 1 };
       }
     };
   }

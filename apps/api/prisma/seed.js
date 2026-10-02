@@ -48,12 +48,35 @@ async function seed() {
 
   // 3. Create Sample Websites
   const demoSiteId = 'site_demo_store_101';
-  let demoSite = await db.website.findFirst({ where: { publicId: demoSiteId } });
+  let demoSite = await db.website.findFirst({
+    where: {
+      OR: [
+        { id: demoSiteId },
+        { publicId: demoSiteId }
+      ]
+    }
+  });
+
+  // If demoSite exists with mismatched ID (e.g. 'web_store_101' from earlier run), clean it up
+  if (demoSite && demoSite.id !== demoSiteId) {
+    logger.info(`Detected existing demo site with legacy ID '${demoSite.id}'. Recreating with '${demoSiteId}'...`);
+    try {
+      await db.trackingKey.deleteMany({ where: { websiteId: demoSite.id } });
+      await db.visitorEvent.deleteMany({ where: { websiteId: demoSite.id } });
+      await db.pageView.deleteMany({ where: { websiteId: demoSite.id } });
+      await db.visitorSession.deleteMany({ where: { websiteId: demoSite.id } });
+      await db.visitor.deleteMany({ where: { websiteId: demoSite.id } });
+      await db.website.delete({ where: { id: demoSite.id } });
+    } catch (e) {
+      logger.warn('Cleanup warning: ' + e.message);
+    }
+    demoSite = null;
+  }
 
   if (!demoSite) {
     demoSite = await db.website.create({
       data: {
-        id: 'web_store_101',
+        id: demoSiteId,
         publicId: demoSiteId,
         organizationId: org.id,
         name: 'Acme E-Commerce Store',
@@ -74,7 +97,7 @@ async function seed() {
         name: 'Production Store Key'
       }
     });
-    logger.info(`Created demo website: ${demoSite.name} (${demoSiteId})`);
+    logger.info(`Created demo website: ${demoSite.name} (${demoSite.id})`);
   }
 
   // 4. Create Seed Historical Visitors & Sessions
@@ -95,14 +118,14 @@ async function seed() {
     const timestamp = new Date(now - (i * 3600000 * 4)).toISOString();
 
     let visitor = await db.visitor.findFirst({
-      where: { anonymousId: vid, websiteId: demoSiteId }
+      where: { anonymousId: vid, websiteId: demoSite.id }
     });
 
     if (!visitor) {
       visitor = await db.visitor.create({
         data: {
           anonymousId: vid,
-          websiteId: demoSiteId,
+          websiteId: demoSite.id,
           firstSeenAt: timestamp,
           lastSeenAt: timestamp,
           totalSessions: i % 2 === 0 ? 3 : 1,
@@ -121,7 +144,7 @@ async function seed() {
     }
 
     let session = await db.visitorSession.findFirst({
-      where: { sessionToken: sid, websiteId: demoSiteId }
+      where: { sessionToken: sid, websiteId: demoSite.id }
     });
 
     if (!session) {
@@ -129,7 +152,7 @@ async function seed() {
         data: {
           sessionToken: sid,
           visitorId: visitor.id,
-          websiteId: demoSiteId,
+          websiteId: demoSite.id,
           status: i === 0 ? 'ONLINE' : 'OFFLINE',
           startedAt: timestamp,
           lastActivityAt: timestamp,
@@ -151,7 +174,7 @@ async function seed() {
       // Create pageviews
       await db.pageView.create({
         data: {
-          websiteId: demoSiteId,
+          websiteId: demoSite.id,
           sessionId: session.id,
           visitorId: visitor.id,
           url: 'https://store.acme.com/',
@@ -165,7 +188,7 @@ async function seed() {
 
       await db.pageView.create({
         data: {
-          websiteId: demoSiteId,
+          websiteId: demoSite.id,
           sessionId: session.id,
           visitorId: visitor.id,
           url: 'https://store.acme.com/pricing',
@@ -181,11 +204,11 @@ async function seed() {
       if (i % 2 === 0) {
         await db.visitorEvent.create({
           data: {
-            websiteId: demoSiteId,
+            websiteId: demoSite.id,
             sessionId: session.id,
             visitorId: visitor.id,
             eventName: 'pricing_view',
-            properties: { plan: 'Pro', currency: 'USD' },
+            properties: JSON.stringify({ plan: 'Pro', currency: 'USD' }),
             timestamp: new Date(new Date(timestamp).getTime() + 90000).toISOString()
           }
         });
@@ -193,17 +216,23 @@ async function seed() {
     }
   }
 
-  // 5. Create Sample Notification
-  await db.notification.create({
-    data: {
-      userId: admin.id,
-      websiteId: demoSite.id,
-      type: 'TRAFFIC_SPIKE',
-      title: 'Traffic Surge Detected',
-      message: 'Your website store.acme.com received a 45% increase in live visitors today.',
-      data: { increasePercentage: 45 }
-    }
+  // 5. Create Sample Notification (idempotent)
+  const existingNotification = await db.notification.findFirst({
+    where: { userId: admin.id, type: 'TRAFFIC_SPIKE' }
   });
+
+  if (!existingNotification) {
+    await db.notification.create({
+      data: {
+        userId: admin.id,
+        websiteId: demoSite.id,
+        type: 'TRAFFIC_SPIKE',
+        title: 'Traffic Surge Detected',
+        message: 'Your website store.acme.com received a 45% increase in live visitors today.',
+        data: JSON.stringify({ increasePercentage: 45 })
+      }
+    });
+  }
 
   logger.info('Database seeding completed successfully!');
 }
