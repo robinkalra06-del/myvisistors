@@ -94,13 +94,9 @@ If you prefer to configure each component manually through the Render UI, follow
      ```bash
      npm install && npx prisma generate --schema=apps/api/prisma/schema.prisma
      ```
-   - **Pre-Deploy Command**:
-     ```bash
-     npx prisma migrate deploy --schema=apps/api/prisma/schema.prisma && node apps/api/prisma/seed.js
-     ```
    - **Start Command**:
      ```bash
-     node apps/api/src/server.js
+     npx prisma migrate deploy --schema=apps/api/prisma/schema.prisma && node apps/api/prisma/seed.js && node apps/api/src/server.js
      ```
    - **Health Check Path**: `/api/health`
 4. In the **Environment Variables** section, add:

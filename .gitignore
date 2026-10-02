@@ -16,7 +16,9 @@ build/
 
 # Local databases
 dev.db
-dev.db-journal
+dev.db*
+*.db
+*.db-*
 *.sqlite
 *.sqlite3
 

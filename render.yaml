@@ -14,8 +14,7 @@ services:
     region: oregon
     rootDir: .
     buildCommand: npm install && npx prisma generate --schema=apps/api/prisma/schema.prisma
-    preDeployCommand: npx prisma migrate deploy --schema=apps/api/prisma/schema.prisma && node apps/api/prisma/seed.js
-    startCommand: node apps/api/src/server.js
+    startCommand: npx prisma migrate deploy --schema=apps/api/prisma/schema.prisma && node apps/api/prisma/seed.js && node apps/api/src/server.js
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
@@ -42,8 +41,6 @@ services:
   - type: web
     name: livetrack-dashboard
     env: static
-    plan: free
-    region: oregon
     rootDir: .
     buildCommand: npm install && npm run build --workspace=apps/dashboard
     staticPublishPath: ./apps/dashboard/dist
