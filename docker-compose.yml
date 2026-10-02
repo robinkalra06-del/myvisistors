@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: livetrack-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: livetrack
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: livetrack-redis
+    restart: always
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: livetrack-api
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 10000
+      DATABASE_URL: postgresql://postgres:postgrespassword@postgres:5432/livetrack?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: super_secure_jwt_secret_livetrack_2026
+      SESSION_SECRET: super_secure_session_secret_livetrack_2026
+      APP_URL: http://localhost:5173
+      API_URL: http://localhost:10000
+    ports:
+      - '10000:10000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: livetrack-dashboard
+    restart: always
+    environment:
+      VITE_API_URL: http://localhost:10000
+    ports:
+      - '5173:80'
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:

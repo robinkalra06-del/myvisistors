@@ -1,0 +1,343 @@
+// LiveTrack Prisma Schema
+// Target Database: PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  OWNER
+  ADMIN
+  VIEWER
+}
+
+enum SessionStatus {
+  ONLINE
+  IDLE
+  OFFLINE
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+}
+
+model User {
+  id                 String               @id @default(uuid())
+  email              String               @unique
+  passwordHash       String
+  name               String
+  role               UserRole             @default(OWNER)
+  avatarUrl          String?
+  isEmailVerified    Boolean              @default(false)
+  verificationToken  String?
+  resetToken         String?
+  resetTokenExpires  DateTime?
+  twoFactorEnabled   Boolean              @default(false)
+  twoFactorSecret    String?
+  isSuspended        Boolean              @default(false)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  memberships        OrganizationMember[]
+  notifications      Notification[]
+  preferences        UserPreference?
+  auditLogs          AuditLog[]
+
+  @@index([email])
+}
+
+model Organization {
+  id          String               @id @default(uuid())
+  name        String
+  slug        String               @unique
+  ownerId     String
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  members     OrganizationMember[]
+  websites    Website[]
+  subscription Subscription?
+
+  @@index([slug])
+  @@index([ownerId])
+}
+
+model OrganizationMember {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String
+  role           UserRole     @default(VIEWER)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@index([organizationId])
+}
+
+model Website {
+  id               String         @id @default(uuid())
+  publicId         String         @unique // site_abc123
+  organizationId   String
+  name             String
+  domain           String
+  allowedOrigins   String         @default("*")
+  isTrackingActive Boolean        @default(true)
+  anonymizeIp      Boolean        @default(true)
+  retentionDays    Int            @default(90)
+  excludedUrls     String         @default("[]") // JSON string of excluded patterns
+  installedAt      DateTime?
+  lastPingAt       DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  trackingKeys     TrackingKey[]
+  visitors         Visitor[]
+  sessions         VisitorSession[]
+  pageViews        PageView[]
+  events           VisitorEvent[]
+  referrals        Referral[]
+  notifications    Notification[]
+
+  @@index([publicId])
+  @@index([organizationId])
+  @@index([domain])
+}
+
+model TrackingKey {
+  id          String   @id @default(uuid())
+  websiteId   String
+  key         String   @unique // tk_live_...
+  name        String   @default("Production Key")
+  isRevoked   Boolean  @default(false)
+  lastUsedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  website     Website  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@index([key])
+  @@index([websiteId])
+}
+
+model Visitor {
+  id             String            @id @default(uuid())
+  anonymousId    String            // vid_...
+  websiteId      String
+  firstSeenAt    DateTime          @default(now())
+  lastSeenAt     DateTime          @default(now())
+  totalSessions  Int               @default(1)
+  isReturning    Boolean           @default(false)
+  lastIp         String?
+  country        String?           @default("Unknown")
+  countryCode    String?           @default("XX")
+  city           String?           @default("Unknown")
+  region         String?
+  deviceType     String?           @default("desktop")
+  browser        String?           @default("Unknown")
+  browserVersion String?
+  os             String?           @default("Unknown")
+  language       String?           @default("en")
+  timezone       String?
+
+  website        Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  sessions       VisitorSession[]
+  locations      VisitorLocation[]
+
+  @@unique([websiteId, anonymousId])
+  @@index([websiteId, anonymousId])
+  @@index([websiteId, lastSeenAt])
+}
+
+model VisitorSession {
+  id               String        @id @default(uuid())
+  sessionToken     String        @unique // sid_...
+  visitorId        String
+  websiteId        String
+  status           SessionStatus @default(ONLINE)
+  startedAt        DateTime      @default(now())
+  endedAt          DateTime?
+  lastActivityAt   DateTime      @default(now())
+  durationSeconds  Int           @default(0)
+  pageViewCount    Int           @default(1)
+  landingPage      String        @default("/")
+  exitPage         String        @default("/")
+  referrer         String?       @default("Direct")
+  channel          String        @default("Direct")
+  utmSource        String?
+  utmMedium        String?
+  utmCampaign      String?
+  screenResolution String?       @default("1920x1080")
+  ip               String?
+  country          String?       @default("Unknown")
+  countryCode      String?       @default("XX")
+  city             String?       @default("Unknown")
+  region           String?
+  browser          String?       @default("Unknown")
+  browserVersion   String?
+  os               String?       @default("Unknown")
+  deviceType       String?       @default("desktop")
+
+  visitor          Visitor       @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  website          Website       @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  pageViews        PageView[]
+  events           VisitorEvent[]
+
+  @@index([sessionToken])
+  @@index([websiteId, status])
+  @@index([websiteId, startedAt])
+  @@index([websiteId, lastActivityAt])
+  @@index([visitorId])
+}
+
+model PageView {
+  id              String         @id @default(uuid())
+  websiteId       String
+  sessionId       String
+  visitorId       String
+  url             String
+  path            String         @default("/")
+  title           String?        @default("Untitled")
+  referrer        String?
+  durationSeconds Int            @default(0)
+  timestamp       DateTime       @default(now())
+
+  website         Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  session         VisitorSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([websiteId, timestamp])
+  @@index([sessionId])
+  @@index([websiteId, path])
+}
+
+model VisitorEvent {
+  id          String         @id @default(uuid())
+  websiteId   String
+  sessionId   String
+  visitorId   String
+  eventName   String
+  properties  String?        @default("{}") // JSON string
+  timestamp   DateTime       @default(now())
+
+  website     Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  session     VisitorSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([websiteId, timestamp])
+  @@index([websiteId, eventName])
+  @@index([sessionId])
+}
+
+model VisitorLocation {
+  id          String   @id @default(uuid())
+  visitorId   String
+  ip          String?
+  country     String?
+  countryCode String?
+  region      String?
+  city        String?
+  latitude    Float?
+  longitude   Float?
+  createdAt   DateTime @default(now())
+
+  visitor     Visitor  @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+
+  @@index([visitorId])
+  @@index([countryCode])
+}
+
+model Referral {
+  id          String   @id @default(uuid())
+  websiteId   String
+  domain      String
+  fullUrl     String?
+  channel     String   @default("Referral")
+  count       Int      @default(1)
+  lastSeenAt  DateTime @default(now())
+
+  website     Website  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, domain])
+  @@index([websiteId, count])
+}
+
+model Notification {
+  id          String   @id @default(uuid())
+  userId      String
+  websiteId   String?
+  type        String
+  title       String
+  message     String
+  data        String?  @default("{}")
+  isRead      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  website     Website? @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+model UserPreference {
+  id                     String   @id @default(uuid())
+  userId                 String   @unique
+  theme                  String   @default("dark")
+  timezone               String   @default("UTC")
+  emailAlerts            Boolean  @default(true)
+  trafficSpikeThreshold  Int      @default(100)
+  soundAlerts            Boolean  @default(false)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id           String   @id @default(uuid())
+  userId       String?
+  action       String
+  resourceType String
+  resourceId   String?
+  ipAddress    String?
+  userAgent    String?
+  details      String?  @default("{}")
+  createdAt    DateTime @default(now())
+
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  organizationId   String             @unique
+  plan             PlanTier           @default(FREE)
+  status           SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd DateTime?
+  visitorLimit     Int                @default(10000)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  organization     Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+}

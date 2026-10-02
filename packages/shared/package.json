@@ -1,0 +1,12 @@
+{
+  "name": "@livetrack/shared",
+  "version": "1.0.0",
+  "description": "Shared constants, utilities and types for LiveTrack platform",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 0"
+  },
+  "keywords": ["livetrack", "analytics", "types", "constants"],
+  "license": "MIT"
+}

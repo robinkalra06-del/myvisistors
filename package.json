@@ -1,0 +1,30 @@
+{
+  "name": "livetrack-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LiveTrack — Real-Time Website Visitor Analytics & Monitoring Platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:api": "npm --workspace=apps/api run dev",
+    "dev:dashboard": "npm --workspace=apps/dashboard run dev",
+    "build": "npm --workspace=apps/dashboard run build",
+    "seed": "npm --workspace=apps/api run seed",
+    "test": "npm --workspace=apps/api run test",
+    "simulate": "node scripts/simulate-traffic.js"
+  },
+  "keywords": [
+    "realtime",
+    "analytics",
+    "visitor-tracker",
+    "socket.io",
+    "postgresql",
+    "prisma",
+    "dashboard"
+  ],
+  "license": "MIT"
+}
