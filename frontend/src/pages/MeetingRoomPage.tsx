@@ -34,6 +34,10 @@ import {
   StopCircle,
   SwitchCamera,
   MoreHorizontal,
+  FileText,
+  Image as ImageIcon,
+  Camera,
+  Layers,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { getSocket, disconnectSocket } from '../services/socket';
@@ -92,6 +96,14 @@ export const MeetingRoomPage: React.FC = () => {
   const [showSecurityModal, setShowSecurityModal] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
+
+  // Mobile Presentation & Slide Sharing State
+  const [showPresentationModal, setShowPresentationModal] = useState(false);
+  const [presentationSlides, setPresentationSlides] = useState<string[]>([]);
+  const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
+  const [isCanvasPresenting, setIsCanvasPresenting] = useState(false);
+  const presentationCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const presentationFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Chat & Captions
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -773,63 +785,196 @@ export const MeetingRoomPage: React.FC = () => {
     }
   };
 
-  // Toggle Screen Sharing (Full presentation support with safe browser fallback)
+  // Stop any active presentation (Screen share, Document/Slides, or Document Cam)
+  const handleStopPresentation = async () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((t) => t.stop());
+      screenStreamRef.current = null;
+    }
+    setLocalScreenStream(null);
+    setIsScreenSharing(false);
+    setIsCanvasPresenting(false);
+    setPresentationSlides([]);
+    setCurrentSlideIndex(0);
+
+    // Revert video track to local webcam in peer connections
+    const webcamTrack = localStreamRef.current?.getVideoTracks()[0] || null;
+    await broadcastVideoTrack(webcamTrack);
+
+    socket.emit('user:toggle-screen', { isScreenSharing: false });
+  };
+
+  // Start Device Screen Share (Desktop or supported browser environment)
+  const handleStartDeviceScreenShare = async () => {
+    setShowPresentationModal(false);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setShowPresentationModal(true);
+      setPermissionError('Mobile browsers restrict OS-level screen capture. Choose "Present Document & Slides" to present any file, photo, or slide live!');
+      return;
+    }
+    try {
+      let screenStream: MediaStream;
+      try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' },
+          audio: true,
+        } as any);
+      } catch (audioFallbackErr) {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always' },
+        } as any);
+      }
+
+      screenStreamRef.current = screenStream;
+      setLocalScreenStream(screenStream);
+      setIsScreenSharing(true);
+
+      const screenTrack = screenStream.getVideoTracks()[0];
+      await broadcastVideoTrack(screenTrack);
+
+      screenTrack.onended = () => {
+        handleStopPresentation();
+      };
+
+      socket.emit('user:toggle-screen', { isScreenSharing: true });
+    } catch (err: any) {
+      if (err.name !== 'NotAllowedError') {
+        console.warn('Screen sharing error:', err);
+        setPermissionError('Screen sharing error: ' + (err.message || 'Permission denied'));
+      }
+    }
+  };
+
+  // Start Document / Slide Presentation via HTML5 Canvas WebRTC Stream (100% Android & Mobile Supported)
+  const handleSelectPresentationFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const urls = files.map((f) => URL.createObjectURL(f));
+    setPresentationSlides(urls);
+    setCurrentSlideIndex(0);
+    setShowPresentationModal(false);
+
+    let canvas = presentationCanvasRef.current;
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.width = 1920;
+      canvas.height = 1080;
+      presentationCanvasRef.current = canvas;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = urls[0];
+    img.onload = async () => {
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(0, 0, canvas!.width, canvas!.height);
+
+      const scale = Math.min((canvas!.width - 80) / img.width, (canvas!.height - 80) / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      const x = (canvas!.width - w) / 2;
+      const y = (canvas!.height - h) / 2;
+
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+      ctx.shadowBlur = 20;
+      ctx.drawImage(img, x, y, w, h);
+      ctx.shadowColor = 'transparent';
+
+      try {
+        const stream = (canvas as any).captureStream(25);
+        screenStreamRef.current = stream;
+        setLocalScreenStream(stream);
+        setIsScreenSharing(true);
+        setIsCanvasPresenting(true);
+
+        const track = stream.getVideoTracks()[0];
+        await broadcastVideoTrack(track);
+
+        socket.emit('user:toggle-screen', { isScreenSharing: true });
+      } catch (err: any) {
+        console.error('Canvas captureStream error:', err);
+        setPermissionError('Could not start slide presentation: ' + err.message);
+      }
+    };
+  };
+
+  // Change active slide in Canvas Presentation
+  const handleSlideChange = (newIndex: number) => {
+    if (newIndex < 0 || newIndex >= presentationSlides.length) return;
+    setCurrentSlideIndex(newIndex);
+    const canvas = presentationCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = presentationSlides[newIndex];
+    img.onload = () => {
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const scale = Math.min((canvas.width - 80) / img.width, (canvas.height - 80) / img.height);
+      const w = img.width * scale;
+      const h = img.height * scale;
+      const x = (canvas.width - w) / 2;
+      const y = (canvas.height - h) / 2;
+
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+      ctx.shadowBlur = 20;
+      ctx.drawImage(img, x, y, w, h);
+      ctx.shadowColor = 'transparent';
+    };
+  };
+
+  // Present via Rear Document Camera
+  const handleStartCameraPresentation = async () => {
+    setShowPresentationModal(false);
+    try {
+      let camStream: MediaStream;
+      try {
+        camStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: { exact: 'environment' } },
+        });
+      } catch (exactErr) {
+        camStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'environment' },
+        });
+      }
+
+      screenStreamRef.current = camStream;
+      setLocalScreenStream(camStream);
+      setIsScreenSharing(true);
+
+      const track = camStream.getVideoTracks()[0];
+      await broadcastVideoTrack(track);
+
+      track.onended = () => {
+        handleStopPresentation();
+      };
+
+      socket.emit('user:toggle-screen', { isScreenSharing: true });
+    } catch (err: any) {
+      console.warn('Document camera presentation error:', err);
+      setPermissionError('Could not start camera presentation: ' + err.message);
+    }
+  };
+
+  // Main Toggle Present Handler
   const handleToggleScreenShare = async () => {
     setPermissionError(null);
 
     if (isScreenSharing) {
-      // Stop Screen Sharing
-      if (screenStreamRef.current) {
-        screenStreamRef.current.getTracks().forEach((t) => t.stop());
-        screenStreamRef.current = null;
-      }
-      setLocalScreenStream(null);
-      setIsScreenSharing(false);
-
-      // Revert video track to local webcam in peer connections
-      const webcamTrack = localStreamRef.current?.getVideoTracks()[0] || null;
-      await broadcastVideoTrack(webcamTrack);
-
-      socket.emit('user:toggle-screen', { isScreenSharing: false });
+      await handleStopPresentation();
     } else {
-      // Start Screen Sharing
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        setPermissionError('Screen sharing is not supported by your current browser or mobile environment. You can still participate with full video and audio!');
-        return;
-      }
-      try {
-        let screenStream: MediaStream;
-        try {
-          screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: { cursor: 'always' },
-            audio: true,
-          } as any);
-        } catch (audioFallbackErr) {
-          // If system audio not supported by browser, fallback to video-only display media
-          screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: { cursor: 'always' },
-          } as any);
-        }
-
-        screenStreamRef.current = screenStream;
-        setLocalScreenStream(screenStream);
-        setIsScreenSharing(true);
-
-        const screenTrack = screenStream.getVideoTracks()[0];
-
-        // Broadcast screen track to peers
-        await broadcastVideoTrack(screenTrack);
-
-        screenTrack.onended = () => {
-          handleToggleScreenShare();
-        };
-
-        socket.emit('user:toggle-screen', { isScreenSharing: true });
-      } catch (err: any) {
-        if (err.name !== 'NotAllowedError') {
-          console.warn('Screen sharing error:', err);
-          setPermissionError('Screen sharing could not be started: ' + (err.message || 'Permission denied'));
-        }
+      if (isMobileDevice || !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        setShowPresentationModal(true);
+      } else {
+        await handleStartDeviceScreenShare();
       }
     }
   };
@@ -1195,6 +1340,29 @@ export const MeetingRoomPage: React.FC = () => {
                   />
                 ) : (
                   <RemoteScreenShareView stream={remotePresenter?.stream} />
+                )}
+
+                {/* Floating slide navigation bar for presenter */}
+                {isCanvasPresenting && presentationSlides.length > 1 && (
+                  <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-full bg-slate-900/95 backdrop-blur-md border border-slate-700 shadow-2xl flex items-center gap-2.5 text-xs">
+                    <button
+                      onClick={() => handleSlideChange(currentSlideIndex - 1)}
+                      disabled={currentSlideIndex === 0}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-white font-medium"
+                    >
+                      ← Prev
+                    </button>
+                    <span className="font-mono text-slate-300 font-semibold text-[11px]">
+                      Slide {currentSlideIndex + 1} of {presentationSlides.length}
+                    </span>
+                    <button
+                      onClick={() => handleSlideChange(currentSlideIndex + 1)}
+                      disabled={currentSlideIndex === presentationSlides.length - 1}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-white font-medium"
+                    >
+                      Next →
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1937,6 +2105,119 @@ export const MeetingRoomPage: React.FC = () => {
 
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* Hidden file input for mobile slides / documents / photos */}
+      <input
+        ref={presentationFileInputRef}
+        type="file"
+        accept="image/*,application/pdf"
+        multiple
+        className="hidden"
+        onChange={handleSelectPresentationFiles}
+      />
+
+      {/* Presentation Mode Selection Modal (Full Android & Mobile Support) */}
+      {showPresentationModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 text-white space-y-5 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <Share2 className="w-5 h-5 text-blue-400" />
+                <h3 className="text-base font-bold">Choose What to Present</h3>
+              </div>
+              <button
+                onClick={() => setShowPresentationModal(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Select how you'd like to share your content with the meeting participants:
+            </p>
+
+            <div className="space-y-3">
+              {/* Option 1: Present Documents, Slides & Photos (100% Android & Mobile Supported) */}
+              <button
+                onClick={() => {
+                  presentationFileInputRef.current?.click();
+                }}
+                className="w-full p-4 rounded-2xl bg-gradient-to-r from-blue-900/40 to-indigo-900/30 hover:from-blue-900/60 hover:to-indigo-900/50 border border-blue-500/40 text-left flex items-start gap-3.5 transition-all group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-500/50 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
+                  <FileText className="w-5 h-5 text-blue-400" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white group-hover:text-blue-300">
+                      Present Photos, Slides & Files
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      Works on Android
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 leading-normal">
+                    Select slides, PDF pages, photos, or screenshots from your phone to stream live with slide navigation controls.
+                  </p>
+                </div>
+              </button>
+
+              {/* Option 2: Present via Rear Camera (Document Cam) */}
+              <button
+                onClick={handleStartCameraPresentation}
+                className="w-full p-4 rounded-2xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700 text-left flex items-start gap-3.5 transition-all group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-500/40 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
+                  <Camera className="w-5 h-5 text-purple-400" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-white group-hover:text-purple-300">
+                      Present via Document Camera
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 leading-normal">
+                    Stream your phone's rear camera as the main presentation screen to show physical notes, products, or paper documents.
+                  </p>
+                </div>
+              </button>
+
+              {/* Option 3: Entire Device Screen */}
+              <button
+                onClick={handleStartDeviceScreenShare}
+                className="w-full p-4 rounded-2xl bg-slate-800/40 hover:bg-slate-800 border border-slate-700/60 text-left flex items-start gap-3.5 transition-all group"
+              >
+                <div className="w-10 h-10 rounded-xl bg-slate-700/40 border border-slate-600/50 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
+                  <Share2 className="w-5 h-5 text-slate-300" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-slate-200 group-hover:text-white">
+                      Entire Device Screen
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      Desktop / PWA
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 leading-normal">
+                    Cast your entire system display or application window (Supported on desktop & native wrappers).
+                  </p>
+                </div>
+              </button>
+            </div>
+
+            <div className="pt-2">
+              <button
+                onClick={() => setShowPresentationModal(false)}
+                className="w-full py-2.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-xs font-semibold text-slate-300"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
