@@ -28,20 +28,13 @@ jobs:
 
       - name: Configure Android SDK & Clean Legacy Plugins
         run: |
-          # 1. Align SDK versions
           sed -i 's/compileSdkVersion = 36/compileSdkVersion = 34/g' frontend/android/variables.gradle || true
           sed -i 's/targetSdkVersion = 36/targetSdkVersion = 34/g' frontend/android/variables.gradle || true
-
-          # 2. Strip unused legacy Cordova references that cause Gradle failure
           sed -i '/cordova.variables.gradle/d' frontend/android/app/capacitor.build.gradle || true
           sed -i '/capacitor-cordova-android-plugins/d' frontend/android/settings.gradle || true
           sed -i '/capacitor-cordova-android-plugins/d' frontend/android/app/build.gradle || true
-
-          # 3. Create dummy file to avoid any script missing exceptions
           mkdir -p frontend/android/capacitor-cordova-android-plugins/src/main/libs
           touch frontend/android/capacitor-cordova-android-plugins/cordova.variables.gradle
-
-          # 4. Accept Android licenses
           yes | sdkmanager --licenses || true
 
       - name: Install Frontend Dependencies
