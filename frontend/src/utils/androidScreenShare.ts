@@ -36,9 +36,44 @@ export const openAndroidAppSettings = (): void => {
   }
 };
 
+export const hasAndroidMediaPermissions = (): boolean => {
+  if (!isAndroidScreenShareSupported()) return true;
+  try {
+    return Boolean((window as any).AndroidScreenShare.hasMediaPermissions?.());
+  } catch (e) {
+    return false;
+  }
+};
+
+export const requestAndroidMediaPermissionsPromise = (): Promise<boolean> => {
+  return new Promise((resolve) => {
+    if (!isAndroidScreenShareSupported()) {
+      resolve(true);
+      return;
+    }
+    if (hasAndroidMediaPermissions()) {
+      resolve(true);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      resolve(hasAndroidMediaPermissions());
+    }, 12000);
+
+    const prevHandler = (window as any).__onAndroidMediaPermissionsUpdated;
+    (window as any).__onAndroidMediaPermissionsUpdated = (granted: boolean) => {
+      clearTimeout(timer);
+      if (prevHandler) prevHandler(granted);
+      resolve(granted);
+    };
+
+    requestAndroidMediaPermissions();
+  });
+};
+
 let activeStream: MediaStream | null = null;
 let activeCanvas: HTMLCanvasElement | null = null;
-let animationFrameId: number | null = null;
+let heartbeatInterval: any = null;
 
 export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
   return new Promise((resolve, reject) => {
@@ -50,8 +85,9 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
     // Clean up any lingering previous canvas / stream
     stopAndroidScreenCaptureStream();
 
-    // 1. Create or retrieve DOM-attached hidden canvas
-    // NOTE: In Chromium / Android WebView, HTMLCanvasElement.captureStream() WILL NOT emit frames unless connected to the DOM!
+    // 1. Create or retrieve DOM-attached canvas
+    // NOTE: In Chromium / Android WebView, HTMLCanvasElement.captureStream() MUST have opacity > 0
+    // and be within viewport bounds, otherwise Blink compositor marks it occluded and stops emitting frames to WebRTC!
     let canvas = document.getElementById('pulsemeet-screen-canvas') as HTMLCanvasElement;
     if (!canvas) {
       canvas = document.createElement('canvas');
@@ -59,19 +95,21 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
       canvas.width = 720;
       canvas.height = 1280;
       canvas.style.position = 'fixed';
-      canvas.style.left = '-9999px';
-      canvas.style.top = '-9999px';
-      canvas.style.width = '1px';
-      canvas.style.height = '1px';
-      canvas.style.opacity = '0';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.width = '100vw';
+      canvas.style.height = '100vh';
+      canvas.style.zIndex = '-9999';
+      canvas.style.opacity = '0.01'; // Non-zero opacity forces compositor rendering
       canvas.style.pointerEvents = 'none';
+      canvas.style.visibility = 'visible';
       document.body.appendChild(canvas);
     }
     activeCanvas = canvas;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (ctx) {
-      ctx.fillStyle = '#090d16';
+      ctx.fillStyle = '#0f172a';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
@@ -94,7 +132,7 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
         canvas.width = targetWidth;
         canvas.height = targetHeight;
         if (ctx) {
-          ctx.fillStyle = '#090d16';
+          ctx.fillStyle = '#0f172a';
           ctx.fillRect(0, 0, targetWidth, targetHeight);
         }
       }
@@ -106,6 +144,7 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
 
         const track = stream.getVideoTracks()[0];
         if (track) {
+          track.enabled = true;
           track.onended = () => {
             console.log('[AndroidScreenShare] Screen track ended');
             stopAndroidScreenCaptureStream();
@@ -125,33 +164,54 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
       }
     };
 
-    // 3. Set callback for each incoming screen frame from native ImageReader
-    let lastRenderedTime = 0;
-    (window as any).__onAndroidScreenFrame = (frameDataUrl: string) => {
-      if (!canvas || !ctx) return;
+    // 3. Sequenced image frame renderer: prevents frame pile-up and memory pressure
+    let isRendering = false;
+    let pendingFrameUrl: string | null = null;
+    let lastRenderedTime = Date.now();
 
+    const renderNextFrame = (frameDataUrl: string) => {
+      isRendering = true;
       const img = new Image();
       img.onload = () => {
-        if (!canvas || !ctx) return;
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        lastRenderedTime = Date.now();
+        if (canvas && ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          lastRenderedTime = Date.now();
+        }
+        isRendering = false;
+        if (pendingFrameUrl) {
+          const next = pendingFrameUrl;
+          pendingFrameUrl = null;
+          renderNextFrame(next);
+        }
+      };
+      img.onerror = () => {
+        isRendering = false;
       };
       img.src = frameDataUrl;
     };
 
-    // Keep canvas alive in Chromium by drawing periodically even on static screen
-    const heartbeatInterval = setInterval(() => {
-      if (activeCanvas && ctx && Date.now() - lastRenderedTime > 2000) {
-        // subtle dirty draw to keep track alive
-        const pixel = ctx.getImageData(0, 0, 1, 1);
-        ctx.putImageData(pixel, 0, 0);
+    // Callback invoked from MainActivity.java ImageReader listener
+    (window as any).__onAndroidScreenFrame = (frameDataUrl: string) => {
+      if (!canvas || !ctx) return;
+      if (isRendering) {
+        pendingFrameUrl = frameDataUrl;
+        return;
       }
-    }, 1000);
+      renderNextFrame(frameDataUrl);
+    };
+
+    // Keep WebRTC encoder fed even during static screen displays
+    heartbeatInterval = setInterval(() => {
+      if (activeCanvas && ctx && Date.now() - lastRenderedTime > 800) {
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, 1, 1);
+      }
+    }, 800);
 
     // 4. Set callback for when capture fails / permission denied
     (window as any).__onAndroidScreenCaptureFailed = (reason: string) => {
       clearTimeout(timeoutHandle);
-      clearInterval(heartbeatInterval);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       console.warn('[AndroidScreenShare] Native capture failed:', reason);
       if (!streamResolved) {
         streamResolved = true;
@@ -164,7 +224,7 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
     // 5. Set callback for when capture stops from native side
     (window as any).__onAndroidScreenCaptureStopped = () => {
       console.log('[AndroidScreenShare] Native screen capture stopped');
-      clearInterval(heartbeatInterval);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       stopAndroidScreenCaptureStream();
     };
 
@@ -173,7 +233,7 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
       (window as any).AndroidScreenShare.startScreenCapture();
     } catch (launchErr: any) {
       clearTimeout(timeoutHandle);
-      clearInterval(heartbeatInterval);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (!streamResolved) {
         streamResolved = true;
         reject(launchErr);
@@ -196,9 +256,9 @@ export const stopAndroidScreenCaptureStream = (): void => {
     activeStream = null;
   }
 
-  if (animationFrameId !== null) {
-    cancelAnimationFrame(animationFrameId);
-    animationFrameId = null;
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
   }
 
   delete (window as any).__onAndroidScreenCaptureStarted;

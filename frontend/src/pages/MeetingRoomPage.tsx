@@ -47,6 +47,8 @@ import { Peer, ChatMessage, LiveCaption } from '../types';
 import { acquireMediaStream } from '../utils/mediaUtils';
 import {
   isAndroidScreenShareSupported,
+  hasAndroidMediaPermissions,
+  requestAndroidMediaPermissionsPromise,
   startAndroidScreenCaptureStream,
   stopAndroidScreenCaptureStream,
   requestAndroidMediaPermissions,
@@ -167,12 +169,36 @@ export const MeetingRoomPage: React.FC = () => {
   // Check which peer is currently presenting (screen sharing)
   const remotePresenter = useMemo(() => {
     for (const peer of peers.values()) {
-      if (peer.isScreenSharing && peer.stream) {
+      if (peer.isScreenSharing) {
         return peer;
       }
     }
     return null;
   }, [peers]);
+
+  // Robust stream resolver for presentation player (retrieves stream from peer or directly from WebRTC receivers)
+  const remotePresenterStream = useMemo(() => {
+    if (!remotePresenter) return null;
+    if (remotePresenter.stream) {
+      const videoTracks = remotePresenter.stream.getVideoTracks();
+      if (videoTracks.length > 0 && videoTracks.some((t) => t.readyState !== 'ended')) {
+        return remotePresenter.stream;
+      }
+    }
+    const pc = peerConnections.current.get(remotePresenter.socketId);
+    if (pc) {
+      const receivers = pc.getReceivers();
+      const videoTrack = receivers.map((r) => r.track).find((t) => t && t.kind === 'video' && t.readyState !== 'ended');
+      if (videoTrack) {
+        return new MediaStream([videoTrack]);
+      }
+      const anyTracks = receivers.map((r) => r.track).filter(Boolean) as MediaStreamTrack[];
+      if (anyTracks.length > 0) {
+        return new MediaStream(anyTracks);
+      }
+    }
+    return remotePresenter.stream || null;
+  }, [remotePresenter, peers]);
 
 
   // 1. Initialize Local Media and Join Socket Room
@@ -195,6 +221,11 @@ export const MeetingRoomPage: React.FC = () => {
           avatarUrl: user?.avatarUrl,
         });
         return;
+      }
+
+      // On Android APK: proactively request OS permissions if not granted
+      if (isAndroidScreenShareSupported() && !hasAndroidMediaPermissions()) {
+        await requestAndroidMediaPermissionsPromise();
       }
 
       // Brief delay (100ms) to allow previous hardware camera sessions (e.g. from Lobby) to cleanly release
@@ -255,10 +286,21 @@ export const MeetingRoomPage: React.FC = () => {
       });
     };
 
+    (window as any).__onAndroidMediaPermissionsUpdated = async (granted: boolean) => {
+      console.log('[AndroidMediaPermissions] Received permission update:', granted);
+      if (granted) {
+        setPermissionError(null);
+        await handleRequestPermissions();
+      } else {
+        setPermissionError('Camera or Microphone was denied in Android permissions. Tap "App Settings" to enable them.');
+      }
+    };
+
     setupCall();
 
     return () => {
       mounted = false;
+      delete (window as any).__onAndroidMediaPermissionsUpdated;
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
@@ -410,10 +452,27 @@ export const MeetingRoomPage: React.FC = () => {
     });
 
     socket.on('peer:screen-changed', ({ socketId, isScreenSharing }) => {
+      const pc = peerConnections.current.get(socketId);
+      let activeStream: MediaStream | null = null;
+      if (pc) {
+        const receivers = pc.getReceivers();
+        const tracks = receivers.map((r) => r.track).filter(Boolean) as MediaStreamTrack[];
+        if (tracks.length > 0) {
+          activeStream = new MediaStream(tracks);
+        }
+      }
+
       setPeers((prev) => {
         const next = new Map(prev);
         const p = next.get(socketId);
-        if (p) next.set(socketId, { ...p, isScreenSharing });
+        if (p) {
+          next.set(socketId, {
+            ...p,
+            isScreenSharing,
+            isVideoOff: isScreenSharing ? false : p.isVideoOff,
+            stream: activeStream || p.stream,
+          });
+        }
         return next;
       });
     });
@@ -622,13 +681,20 @@ export const MeetingRoomPage: React.FC = () => {
   const broadcastVideoTrack = async (track: MediaStreamTrack | null) => {
     for (const [targetSocketId, pc] of peerConnections.current.entries()) {
       try {
-        const videoTransceiver = pc.getTransceivers().find(
+        if (pc.signalingState === 'closed') continue;
+        let videoTransceiver = pc.getTransceivers().find(
           (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
         );
-        const sender = videoTransceiver?.sender;
-
-        if (sender) {
-          await sender.replaceTrack(track);
+        if (!videoTransceiver && track) {
+          videoTransceiver = pc.addTransceiver(track, { direction: 'sendrecv' });
+        }
+        if (videoTransceiver) {
+          if (videoTransceiver.direction !== 'sendrecv') {
+            videoTransceiver.direction = 'sendrecv';
+          }
+          if (videoTransceiver.sender) {
+            await videoTransceiver.sender.replaceTrack(track);
+          }
         }
       } catch (e) {
         console.warn(`Error broadcasting video track to ${targetSocketId}:`, e);
@@ -640,13 +706,20 @@ export const MeetingRoomPage: React.FC = () => {
   const broadcastAudioTrack = async (track: MediaStreamTrack | null) => {
     for (const [targetSocketId, pc] of peerConnections.current.entries()) {
       try {
-        const audioTransceiver = pc.getTransceivers().find(
+        if (pc.signalingState === 'closed') continue;
+        let audioTransceiver = pc.getTransceivers().find(
           (t) => t.receiver.track?.kind === 'audio' || t.sender.track?.kind === 'audio'
         );
-        const sender = audioTransceiver?.sender;
-
-        if (sender) {
-          await sender.replaceTrack(track);
+        if (!audioTransceiver && track) {
+          audioTransceiver = pc.addTransceiver(track, { direction: 'sendrecv' });
+        }
+        if (audioTransceiver) {
+          if (audioTransceiver.direction !== 'sendrecv') {
+            audioTransceiver.direction = 'sendrecv';
+          }
+          if (audioTransceiver.sender) {
+            await audioTransceiver.sender.replaceTrack(track);
+          }
         }
       } catch (e) {
         console.warn(`Error broadcasting audio track to ${targetSocketId}:`, e);
@@ -738,8 +811,12 @@ export const MeetingRoomPage: React.FC = () => {
   const handleRequestPermissions = async () => {
     try {
       setPermissionError(null);
-      if (isAndroidScreenShareSupported()) {
-        requestAndroidMediaPermissions();
+      if (isAndroidScreenShareSupported() && !hasAndroidMediaPermissions()) {
+        const granted = await requestAndroidMediaPermissionsPromise();
+        if (!granted) {
+          setPermissionError('Camera and Microphone access is denied. Please tap "App Settings" to allow them.');
+          return;
+        }
       }
       const stream = await acquireMediaStream(cameraFacingMode);
       if (!stream) {
@@ -846,6 +923,7 @@ export const MeetingRoomPage: React.FC = () => {
         screenStreamRef.current = screenStream;
         setLocalScreenStream(screenStream);
         setIsScreenSharing(true);
+        setIsVideoOff(false);
 
         const screenTrack = screenStream.getVideoTracks()[0];
         await broadcastVideoTrack(screenTrack);
@@ -854,6 +932,7 @@ export const MeetingRoomPage: React.FC = () => {
           handleStopPresentation();
         };
 
+        socket.emit('user:toggle-video', { isVideoOff: false });
         socket.emit('user:toggle-screen', { isScreenSharing: true });
         return;
       } catch (err: any) {
@@ -887,6 +966,7 @@ export const MeetingRoomPage: React.FC = () => {
       screenStreamRef.current = screenStream;
       setLocalScreenStream(screenStream);
       setIsScreenSharing(true);
+      setIsVideoOff(false);
 
       const screenTrack = screenStream.getVideoTracks()[0];
       await broadcastVideoTrack(screenTrack);
@@ -895,6 +975,7 @@ export const MeetingRoomPage: React.FC = () => {
         handleStopPresentation();
       };
 
+      socket.emit('user:toggle-video', { isVideoOff: false });
       socket.emit('user:toggle-screen', { isScreenSharing: true });
     } catch (err: any) {
       if (err.name !== 'NotAllowedError') {
@@ -966,10 +1047,12 @@ export const MeetingRoomPage: React.FC = () => {
         setLocalScreenStream(stream);
         setIsScreenSharing(true);
         setIsCanvasPresenting(true);
+        setIsVideoOff(false);
 
         const track = stream.getVideoTracks()[0];
         await broadcastVideoTrack(track);
 
+        socket.emit('user:toggle-video', { isVideoOff: false });
         socket.emit('user:toggle-screen', { isScreenSharing: true });
       } catch (err: any) {
         console.error('Canvas captureStream error:', err);
@@ -1036,6 +1119,7 @@ export const MeetingRoomPage: React.FC = () => {
       screenStreamRef.current = camStream;
       setLocalScreenStream(camStream);
       setIsScreenSharing(true);
+      setIsVideoOff(false);
 
       const track = camStream.getVideoTracks()[0];
       await broadcastVideoTrack(track);
@@ -1044,6 +1128,7 @@ export const MeetingRoomPage: React.FC = () => {
         handleStopPresentation();
       };
 
+      socket.emit('user:toggle-video', { isVideoOff: false });
       socket.emit('user:toggle-screen', { isScreenSharing: true });
     } catch (err: any) {
       console.warn('Document camera presentation error:', err);
@@ -1442,7 +1527,7 @@ export const MeetingRoomPage: React.FC = () => {
                     className="w-full h-full object-contain"
                   />
                 ) : (
-                  <RemoteScreenShareView stream={remotePresenter?.stream} />
+                  <RemoteScreenShareView stream={remotePresenterStream || remotePresenter?.stream} />
                 )}
 
                 {/* Floating slide navigation bar for presenter */}
@@ -2440,6 +2525,23 @@ const RemoteVideoTile: React.FC<{
         audioRef.current.srcObject = peer.stream;
         audioRef.current.play().catch((e) => console.warn('[Audio] Remote play catch:', e));
       }
+
+      const videoTracks = peer.stream.getVideoTracks();
+      videoTracks.forEach((t) => {
+        t.onunmute = () => {
+          if (videoRef.current) {
+            videoRef.current.play().catch(() => {});
+          }
+        };
+      });
+      const audioTracks = peer.stream.getAudioTracks();
+      audioTracks.forEach((t) => {
+        t.onunmute = () => {
+          if (audioRef.current) {
+            audioRef.current.play().catch(() => {});
+          }
+        };
+      });
     }
   }, [peer.stream]);
 
@@ -2486,24 +2588,73 @@ const RemoteVideoTile: React.FC<{
   );
 };
 
-// Sub-component: Remote Screen Share Presentation Player
-const RemoteScreenShareView: React.FC<{ stream?: MediaStream }> = ({ stream }) => {
+// Sub-component: Remote Screen Share Presentation Player with resilient autoplay and frame detection
+const RemoteScreenShareView: React.FC<{ stream?: MediaStream | null }> = ({ stream }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch((e) => console.warn('Screen share autoplay catch:', e));
+    const video = videoRef.current;
+    if (!video || !stream) {
+      setIsPlaying(false);
+      return;
     }
+
+    video.srcObject = stream;
+
+    const playVideo = () => {
+      video
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch((e) => {
+          console.warn('[ScreenShareView] Autoplay catch, retrying muted:', e);
+          video.muted = true;
+          video.play().then(() => setIsPlaying(true)).catch(() => {});
+        });
+    };
+
+    playVideo();
+
+    const videoTracks = stream.getVideoTracks();
+    videoTracks.forEach((track) => {
+      track.onunmute = () => {
+        playVideo();
+      };
+      track.onended = () => {
+        setIsPlaying(false);
+      };
+    });
+
+    const handleLoadedMetadata = () => {
+      playVideo();
+    };
+
+    video.addEventListener('loadedmetadata', handleLoadedMetadata);
+
+    return () => {
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      videoTracks.forEach((track) => {
+        track.onunmute = null;
+        track.onended = null;
+      });
+    };
   }, [stream]);
 
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      muted
-      className="w-full h-full object-contain bg-black"
-    />
+    <div className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="w-full h-full object-contain bg-black"
+      />
+      {!isPlaying && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm gap-3 z-10">
+          <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm font-medium text-slate-300">Connecting presentation stream...</p>
+        </div>
+      )}
+    </div>
   );
 };

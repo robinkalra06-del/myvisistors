@@ -13,7 +13,11 @@ export const acquireMediaStream = async (facingMode: 'user' | 'environment' = 'u
       video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: { echoCancellation: true, noiseSuppression: true },
     });
-  } catch (e1) {
+  } catch (e1: any) {
+    if (e1.name === 'NotAllowedError' || e1.name === 'PermissionDeniedError') {
+      console.warn('[MediaUtils] Media permissions denied by user or OS:', e1.message);
+      return null;
+    }
     console.warn('[MediaUtils] Strategy 1 (HD facingMode + echo audio) failed, trying relaxed constraints:', e1);
   }
 
@@ -23,14 +27,22 @@ export const acquireMediaStream = async (facingMode: 'user' | 'environment' = 'u
       video: { facingMode: { ideal: facingMode } },
       audio: true,
     });
-  } catch (e2) {
+  } catch (e2: any) {
+    if (e2.name === 'NotAllowedError' || e2.name === 'PermissionDeniedError') {
+      console.warn('[MediaUtils] Media permissions denied by user or OS:', e2.message);
+      return null;
+    }
     console.warn('[MediaUtils] Strategy 2 (Relaxed facingMode + basic audio) failed, trying generic video+audio:', e2);
   }
 
   // Strategy 3: Generic boolean video + audio
   try {
     return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  } catch (e3) {
+  } catch (e3: any) {
+    if (e3.name === 'NotAllowedError' || e3.name === 'PermissionDeniedError') {
+      console.warn('[MediaUtils] Media permissions denied by user or OS:', e3.message);
+      return null;
+    }
     console.warn('[MediaUtils] Strategy 3 (Generic boolean) failed, trying sequential Android HAL acquisition:', e3);
   }
 
@@ -42,19 +54,23 @@ export const acquireMediaStream = async (facingMode: 'user' | 'environment' = 'u
   try {
     const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     aTrack = aStream.getAudioTracks()[0] || null;
-  } catch (errA) {
-    console.warn('[MediaUtils] Sequential audio failed:', errA);
+  } catch (errA: any) {
+    if (errA.name !== 'NotAllowedError' && errA.name !== 'PermissionDeniedError') {
+      console.warn('[MediaUtils] Sequential audio failed:', errA);
+    }
   }
 
   try {
     const vStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facingMode } } });
     vTrack = vStream.getVideoTracks()[0] || null;
-  } catch (errV1) {
-    try {
-      const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
-      vTrack = vStream.getVideoTracks()[0] || null;
-    } catch (errV2) {
-      console.warn('[MediaUtils] Sequential video failed:', errV2);
+  } catch (errV1: any) {
+    if (errV1.name !== 'NotAllowedError' && errV1.name !== 'PermissionDeniedError') {
+      try {
+        const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        vTrack = vStream.getVideoTracks()[0] || null;
+      } catch (errV2) {
+        console.warn('[MediaUtils] Sequential video failed:', errV2);
+      }
     }
   }
 

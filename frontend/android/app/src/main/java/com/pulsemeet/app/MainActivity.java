@@ -92,6 +92,14 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
+    private PermissionRequest pendingWebPermissionRequest;
+
+    public boolean hasMediaPermissions() {
+        boolean camera = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+        boolean mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+        return camera && mic;
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private void configureWebView() {
         try {
@@ -105,25 +113,78 @@ public class MainActivity extends BridgeActivity {
                 settings.setAllowContentAccess(true);
                 settings.setDatabaseEnabled(true);
 
-                // Add Javascript interface for Android Screen Share
+                // Add Javascript interface for Android Screen Share and Media Permissions
                 webView.addJavascriptInterface(new AndroidScreenShareBridge(this), "AndroidScreenShare");
 
-                // Override WebChromeClient to auto-grant WebRTC audio & video capture
+                // Override WebChromeClient to auto-grant WebRTC audio & video capture when OS permissions are granted, or prompt if not
                 webView.setWebChromeClient(new BridgeWebChromeClient(this.bridge) {
                     @Override
                     public void onPermissionRequest(final PermissionRequest request) {
-                        MainActivity.this.runOnUiThread(() -> {
-                            try {
-                                request.grant(request.getResources());
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                            }
-                        });
+                        MainActivity.this.runOnUiThread(() -> handleWebPermissionRequest(request));
                     }
                 });
             }
         } catch (Exception e) {
             e.printStackTrace();
+        }
+    }
+
+    private void handleWebPermissionRequest(final PermissionRequest request) {
+        try {
+            List<String> neededPermissions = new ArrayList<>();
+            for (String res : request.getResources()) {
+                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(res)) {
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                        neededPermissions.add(Manifest.permission.CAMERA);
+                    }
+                } else if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(res)) {
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                        neededPermissions.add(Manifest.permission.RECORD_AUDIO);
+                    }
+                }
+            }
+
+            if (neededPermissions.isEmpty()) {
+                request.grant(request.getResources());
+            } else {
+                pendingWebPermissionRequest = request;
+                ActivityCompat.requestPermissions(
+                    this,
+                    neededPermissions.toArray(new String[0]),
+                    PERMISSION_REQ_CODE
+                );
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERMISSION_REQ_CODE) {
+            boolean allGranted = grantResults.length > 0;
+            for (int result : grantResults) {
+                if (result != PackageManager.PERMISSION_GRANTED) {
+                    allGranted = false;
+                    break;
+                }
+            }
+
+            if (pendingWebPermissionRequest != null) {
+                try {
+                    if (allGranted) {
+                        pendingWebPermissionRequest.grant(pendingWebPermissionRequest.getResources());
+                    } else {
+                        pendingWebPermissionRequest.deny();
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                pendingWebPermissionRequest = null;
+            }
+
+            sendJsEvent("window.__onAndroidMediaPermissionsUpdated && window.__onAndroidMediaPermissionsUpdated(" + allGranted + ");");
         }
     }
 
@@ -327,6 +388,41 @@ public class MainActivity extends BridgeActivity {
                     webView.evaluateJavascript("window.__onAndroidScreenFrame && window.__onAndroidScreenFrame('data:image/jpeg;base64," + base64 + "');", null);
                 }
             });
+        }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        configureWebView();
+        if (hasMediaPermissions()) {
+            sendJsEvent("window.__onAndroidMediaPermissionsUpdated && window.__onAndroidMediaPermissionsUpdated(true);");
+        }
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        if (isCapturing) {
+            try {
+                WebView webView = this.bridge != null ? this.bridge.getWebView() : null;
+                if (webView != null) {
+                    webView.onResume();
+                }
+            } catch (Exception ignore) {}
+        }
+    }
+
+    @Override
+    public void onStop() {
+        super.onStop();
+        if (isCapturing) {
+            try {
+                WebView webView = this.bridge != null ? this.bridge.getWebView() : null;
+                if (webView != null) {
+                    webView.onResume();
+                }
+            } catch (Exception ignore) {}
         }
     }
 

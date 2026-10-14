@@ -8,13 +8,7 @@ export const getSocketServerUrl = (): string => {
 
   let serverUrl = import.meta.env.VITE_SERVER_URL;
   if (!serverUrl) {
-    if (typeof window !== 'undefined') {
-      if ((window as any).Capacitor || window.location.protocol === 'capacitor:' || window.location.hostname.endsWith('.onrender.com')) {
-        return 'https://pulsemeet-backend-tjv7.onrender.com';
-      }
-      return window.location.origin;
-    }
-    return 'http://localhost:5001';
+    return 'https://pulsemeet-backend-tjv7.onrender.com';
   }
   if (!serverUrl.startsWith('http://') && !serverUrl.startsWith('https://') && !serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) {
     serverUrl = `https://${serverUrl}`;

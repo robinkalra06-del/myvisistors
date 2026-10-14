@@ -22,7 +22,7 @@ const app = express();
 const server = http.createServer(app);
 
 const PORT = process.env.PORT || 5001;
-const rawClientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+const rawClientUrl = process.env.CLIENT_URL || 'https://pulsemeet-frontend-lj4y.onrender.com';
 const normalizedClientUrl = rawClientUrl.startsWith('http') ? rawClientUrl : `https://${rawClientUrl}`;
 
 const isAllowedOrigin = (origin: string | undefined): boolean => {

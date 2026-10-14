@@ -38,4 +38,9 @@ public class AndroidScreenShareBridge {
     public void openAppSettings() {
         activity.openAppSettings();
     }
+
+    @JavascriptInterface
+    public boolean hasMediaPermissions() {
+        return activity.hasMediaPermissions();
+    }
 }
