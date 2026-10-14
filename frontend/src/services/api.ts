@@ -8,8 +8,10 @@ export const getApiBaseUrl = (): string => {
   }
   let url = import.meta.env.VITE_API_URL || import.meta.env.VITE_SERVER_URL;
   if (!url) {
-    if (typeof window !== 'undefined' && ((window as any).Capacitor || window.location.protocol === 'capacitor:')) {
-      return 'https://pulsemeet-backend.onrender.com/api';
+    if (typeof window !== 'undefined') {
+      if ((window as any).Capacitor || window.location.protocol === 'capacitor:' || window.location.hostname.endsWith('.onrender.com')) {
+        return 'https://pulsemeet-backend-tjv7.onrender.com/api';
+      }
     }
     return '/api';
   }

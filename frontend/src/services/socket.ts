@@ -8,10 +8,13 @@ export const getSocketServerUrl = (): string => {
 
   let serverUrl = import.meta.env.VITE_SERVER_URL;
   if (!serverUrl) {
-    if (typeof window !== 'undefined' && ((window as any).Capacitor || window.location.protocol === 'capacitor:')) {
-      return 'https://pulsemeet-backend.onrender.com';
+    if (typeof window !== 'undefined') {
+      if ((window as any).Capacitor || window.location.protocol === 'capacitor:' || window.location.hostname.endsWith('.onrender.com')) {
+        return 'https://pulsemeet-backend-tjv7.onrender.com';
+      }
+      return window.location.origin;
     }
-    return typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5001';
+    return 'http://localhost:5001';
   }
   if (!serverUrl.startsWith('http://') && !serverUrl.startsWith('https://') && !serverUrl.startsWith('ws://') && !serverUrl.startsWith('wss://')) {
     serverUrl = `https://${serverUrl}`;
@@ -25,9 +28,11 @@ export const getSocket = (): Socket => {
     socket = io(serverUrl, {
       autoConnect: true,
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: 15,
       reconnectionDelay: 1000,
-      transports: ['websocket', 'polling'],
+      reconnectionDelayMax: 5000,
+      transports: ['polling', 'websocket'],
+      upgrade: true,
       withCredentials: true,
     });
   }

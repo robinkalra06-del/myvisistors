@@ -54,6 +54,7 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.relay.metered.ca:80' },
   ],
   iceCandidatePoolSize: 10,
 };
@@ -592,22 +593,12 @@ export const MeetingRoomPage: React.FC = () => {
       console.warn('Error adding video transceiver:', e);
     }
 
-    // Negotiation handler for mid-call updates
-    pc.onnegotiationneeded = async () => {
-      if (pc.signalingState !== 'stable') return;
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('signal:offer', { targetSocketId, sdp: offer });
-      } catch (e) {
-        console.warn('onnegotiationneeded error:', e);
-      }
-    };
-
-    // If this peer is the initiator, generate and send the initial SDP offer
+    // Only the designated initiator creates the offer.
+    // The answering peer must NEVER create an offer, which prevents symmetric offer collisions
+    // ("Failed to set SSL role for the transport" and m-line order mismatch).
     if (isInitiator) {
       setTimeout(async () => {
-        if (pc.signalingState === 'closed') return;
+        if (pc.signalingState !== 'stable') return;
         try {
           const offer = await pc.createOffer({
             offerToReceiveAudio: true,
@@ -616,7 +607,7 @@ export const MeetingRoomPage: React.FC = () => {
           await pc.setLocalDescription(offer);
           socket.emit('signal:offer', { targetSocketId, sdp: offer });
         } catch (err) {
-          console.error('Initial offer generation error:', err);
+          console.error('[WebRTC] Initial offer generation error:', err);
         }
       }, 50);
     }
@@ -2387,6 +2378,7 @@ const RemoteScreenShareView: React.FC<{ stream?: MediaStream }> = ({ stream }) =
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      videoRef.current.play().catch((e) => console.warn('Screen share autoplay catch:', e));
     }
   }, [stream]);
 
@@ -2395,7 +2387,8 @@ const RemoteScreenShareView: React.FC<{ stream?: MediaStream }> = ({ stream }) =
       ref={videoRef}
       autoPlay
       playsInline
-      className="w-full h-full object-contain"
+      muted
+      className="w-full h-full object-contain bg-black"
     />
   );
 };
