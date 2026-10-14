@@ -4,10 +4,6 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.webkit.PermissionRequest;
-import android.webkit.WebChromeClient;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.BridgeActivity;
@@ -36,34 +32,6 @@ public class MainActivity extends BridgeActivity {
             if (needRequest) {
                 ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQ_CODE);
             }
-        }
-
-        // Configure WebView settings to allow WebRTC, Media Capture and Auto-playback
-        try {
-            WebView webView = this.bridge.getWebView();
-            if (webView != null) {
-                WebSettings settings = webView.getSettings();
-                settings.setJavaScriptEnabled(true);
-                settings.setDomStorageEnabled(true);
-                settings.setMediaPlaybackRequiresUserGesture(false);
-                settings.setAllowFileAccess(true);
-                settings.setAllowContentAccess(true);
-                settings.setDatabaseEnabled(true);
-
-                webView.setWebChromeClient(new com.getcapacitor.BridgeWebChromeClient(this.bridge) {
-                    @Override
-                    public void onPermissionRequest(final PermissionRequest request) {
-                        MainActivity.this.runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                request.grant(request.getResources());
-                            }
-                        });
-                    }
-                });
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
         }
     }
 }
