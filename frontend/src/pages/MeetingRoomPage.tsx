@@ -2027,6 +2027,19 @@ export const MeetingRoomPage: React.FC = () => {
             {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
           </button>
 
+          {/* Mobile Screen / Presentation Share Button */}
+          <button
+            onClick={handleToggleScreenShare}
+            className={`p-3 rounded-full transition-all shadow-md ${
+              isScreenSharing
+                ? 'bg-blue-600 text-white shadow-blue-500/30'
+                : 'bg-slate-800 text-slate-200 border border-slate-700'
+            }`}
+            title="Share Screen or Document"
+          >
+            <Share2 className="w-5 h-5 text-blue-400" />
+          </button>
+
           {/* Mobile Flip Camera (Front/Rear switch) */}
           {!isVideoOff && (
             <button
@@ -2226,8 +2239,9 @@ export const MeetingRoomPage: React.FC = () => {
         </div>
       )}
 
-      {/* Hidden file input for mobile slides / documents / photos */}
+      {/* File input for mobile slides / documents / photos */}
       <input
+        id="mobile-presentation-file-input"
         ref={presentationFileInputRef}
         type="file"
         accept="image/*,application/pdf"
@@ -2258,12 +2272,10 @@ export const MeetingRoomPage: React.FC = () => {
             </p>
 
             <div className="space-y-3">
-              {/* Option 1: Present Documents, Slides & Photos (100% Android & Mobile Supported) */}
-              <button
-                onClick={() => {
-                  presentationFileInputRef.current?.click();
-                }}
-                className="w-full p-4 rounded-2xl bg-gradient-to-r from-blue-900/40 to-indigo-900/30 hover:from-blue-900/60 hover:to-indigo-900/50 border border-blue-500/40 text-left flex items-start gap-3.5 transition-all group"
+              {/* Option 1: Present Documents, Slides & Photos (Direct native Android file picker) */}
+              <label
+                htmlFor="mobile-presentation-file-input"
+                className="w-full p-4 rounded-2xl bg-gradient-to-r from-blue-900/40 to-indigo-900/30 hover:from-blue-900/60 hover:to-indigo-900/50 border border-blue-500/40 text-left flex items-start gap-3.5 transition-all group cursor-pointer block"
               >
                 <div className="w-10 h-10 rounded-xl bg-blue-600/30 border border-blue-500/50 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
                   <FileText className="w-5 h-5 text-blue-400" />
@@ -2278,10 +2290,10 @@ export const MeetingRoomPage: React.FC = () => {
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1 leading-normal">
-                    Select slides, PDF pages, photos, or screenshots from your phone to stream live with slide navigation controls.
+                    Tap to select presentation slides, PDF pages, photos, or screenshots from your phone to stream live.
                   </p>
                 </div>
-              </button>
+              </label>
 
               {/* Option 2: Present via Rear Camera (Document Cam) */}
               <button
