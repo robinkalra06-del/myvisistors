@@ -9,6 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
     "axios": "^1.7.7",
     "canvas-confetti": "^1.9.4",
     "date-fns": "^4.1.0",

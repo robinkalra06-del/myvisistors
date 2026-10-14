@@ -1,14 +1,28 @@
 import axios from 'axios';
 
-let API_BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_SERVER_URL || '/api';
-if (API_BASE_URL && API_BASE_URL !== '/api') {
-  if (!API_BASE_URL.startsWith('http://') && !API_BASE_URL.startsWith('https://')) {
-    API_BASE_URL = `https://${API_BASE_URL}`;
+export const getApiBaseUrl = (): string => {
+  const custom = typeof localStorage !== 'undefined' ? localStorage.getItem('pulsemeet_custom_server_url') : null;
+  if (custom) {
+    const clean = custom.replace(/\/+$/, '');
+    return clean.endsWith('/api') ? clean : `${clean}/api`;
   }
-  if (!API_BASE_URL.endsWith('/api') && !API_BASE_URL.includes('/api/')) {
-    API_BASE_URL = `${API_BASE_URL.replace(/\/+$/, '')}/api`;
+  let url = import.meta.env.VITE_API_URL || import.meta.env.VITE_SERVER_URL;
+  if (!url) {
+    if (typeof window !== 'undefined' && ((window as any).Capacitor || window.location.protocol === 'capacitor:')) {
+      return 'https://pulsemeet-backend.onrender.com/api';
+    }
+    return '/api';
   }
-}
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = `https://${url}`;
+  }
+  if (!url.endsWith('/api') && !url.includes('/api/')) {
+    url = `${url.replace(/\/+$/, '')}/api`;
+  }
+  return url;
+};
+
+export const API_BASE_URL = getApiBaseUrl();
 
 export const api = axios.create({
   baseURL: API_BASE_URL,

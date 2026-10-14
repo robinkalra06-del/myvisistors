@@ -1,0 +1,18 @@
+{
+  "name": "PulseMeet Video Conferencing",
+  "short_name": "PulseMeet",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "description": "Secure, enterprise-grade video meetings with real-time video, audio, slide presentation, and in-call chat.",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

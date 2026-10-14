@@ -326,6 +326,13 @@ export const MeetingRoomPage: React.FC = () => {
         pc = createPeerConnection(senderSocketId, { socketId: senderSocketId } as Peer, false);
       }
       try {
+        // Handle glare/collision if offer is received in non-stable state
+        if (pc.signalingState !== 'stable') {
+          try {
+            await pc.setLocalDescription({ type: 'rollback' } as any);
+          } catch (e) {}
+        }
+
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
 
         // Drain any queued ICE candidates that arrived before setRemoteDescription
@@ -351,6 +358,11 @@ export const MeetingRoomPage: React.FC = () => {
       const pc = peerConnections.current.get(senderSocketId);
       if (pc) {
         try {
+          if (pc.signalingState !== 'have-local-offer') {
+            console.warn(`[WebRTC] Ignoring signal:answer for ${senderSocketId} because signalingState is '${pc.signalingState}' (expected 'have-local-offer')`);
+            return;
+          }
+
           await pc.setRemoteDescription(new RTCSessionDescription(sdp));
 
           // Drain any queued ICE candidates that arrived before setRemoteDescription
@@ -511,7 +523,7 @@ export const MeetingRoomPage: React.FC = () => {
     };
   }, [socket, activeDrawer]);
 
-  // WebRTC Peer Connection Factory with Transceivers
+  // WebRTC Peer Connection Factory with Deterministic Transceivers
   const createPeerConnection = (targetSocketId: string, peerInfo: Peer, isInitiator: boolean) => {
     const pc = new RTCPeerConnection(ICE_SERVERS);
     peerConnections.current.set(targetSocketId, pc);
@@ -556,24 +568,28 @@ export const MeetingRoomPage: React.FC = () => {
       });
     };
 
-    // Add local media tracks if available
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        try {
-          pc.addTrack(track, localStreamRef.current!);
-        } catch (e) {
-          console.warn('Failed to add track to pc:', e);
-        }
+    // Deterministic Transceiver setup:
+    // ALWAYS create audio transceiver at index 0 and video transceiver at index 1.
+    // This strictly adheres to RFC 8829 (JSEP) so SDP m-lines are identical across all peers.
+    const audioTrack = localStreamRef.current?.getAudioTracks()[0] || null;
+    const videoTrack = (isScreenSharing && screenStreamRef.current?.getVideoTracks()[0]) || localStreamRef.current?.getVideoTracks()[0] || null;
+
+    try {
+      pc.addTransceiver(audioTrack || 'audio', {
+        direction: 'sendrecv',
+        streams: localStreamRef.current ? [localStreamRef.current] : [],
       });
+    } catch (e) {
+      console.warn('Error adding audio transceiver:', e);
     }
 
-    // Ensure transceivers exist to always allow bidirectional media
-    const senders = pc.getSenders();
-    if (!senders.some((s) => s.track?.kind === 'audio')) {
-      try { pc.addTransceiver('audio', { direction: 'sendrecv' }); } catch (e) {}
-    }
-    if (!senders.some((s) => s.track?.kind === 'video')) {
-      try { pc.addTransceiver('video', { direction: 'sendrecv' }); } catch (e) {}
+    try {
+      pc.addTransceiver(videoTrack || 'video', {
+        direction: 'sendrecv',
+        streams: localStreamRef.current ? [localStreamRef.current] : [],
+      });
+    } catch (e) {
+      console.warn('Error adding video transceiver:', e);
     }
 
     // Negotiation handler for mid-call updates
@@ -619,22 +635,15 @@ export const MeetingRoomPage: React.FC = () => {
     for (const [targetSocketId, pc] of peerConnections.current.entries()) {
       try {
         const videoTransceiver = pc.getTransceivers().find(
-          (t) => (t.sender.track && t.sender.track.kind === 'video') || t.receiver.track?.kind === 'video'
+          (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
         );
-        const sender = videoTransceiver?.sender || pc.getSenders().find((s) => s.track?.kind === 'video');
+        const sender = videoTransceiver?.sender;
 
         if (sender) {
           await sender.replaceTrack(track);
-        } else if (track) {
-          pc.addTrack(track, localStreamRef.current || new MediaStream([track]));
-          if (pc.signalingState === 'stable') {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('signal:offer', { targetSocketId, sdp: offer });
-          }
         }
       } catch (e) {
-        console.warn('Error broadcasting video track:', e);
+        console.warn(`Error broadcasting video track to ${targetSocketId}:`, e);
       }
     }
   };
@@ -644,22 +653,15 @@ export const MeetingRoomPage: React.FC = () => {
     for (const [targetSocketId, pc] of peerConnections.current.entries()) {
       try {
         const audioTransceiver = pc.getTransceivers().find(
-          (t) => (t.sender.track && t.sender.track.kind === 'audio') || t.receiver.track?.kind === 'audio'
+          (t) => t.receiver.track?.kind === 'audio' || t.sender.track?.kind === 'audio'
         );
-        const sender = audioTransceiver?.sender || pc.getSenders().find((s) => s.track?.kind === 'audio');
+        const sender = audioTransceiver?.sender;
 
         if (sender) {
           await sender.replaceTrack(track);
-        } else if (track) {
-          pc.addTrack(track, localStreamRef.current || new MediaStream([track]));
-          if (pc.signalingState === 'stable') {
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('signal:offer', { targetSocketId, sdp: offer });
-          }
         }
       } catch (e) {
-        console.warn('Error broadcasting audio track:', e);
+        console.warn(`Error broadcasting audio track to ${targetSocketId}:`, e);
       }
     }
   };
@@ -741,6 +743,32 @@ export const MeetingRoomPage: React.FC = () => {
     }
   };
 
+  // Request or Retry Camera and Microphone Permissions dynamically
+  const handleRequestPermissions = async () => {
+    try {
+      setPermissionError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: cameraFacingMode },
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+      localStreamRef.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      setIsVideoOff(false);
+      setIsAudioMuted(false);
+      const audioTrack = stream.getAudioTracks()[0] || null;
+      const videoTrack = stream.getVideoTracks()[0] || null;
+      if (audioTrack) await broadcastAudioTrack(audioTrack);
+      if (videoTrack) await broadcastVideoTrack(videoTrack);
+      socket.emit('user:toggle-audio', { isMuted: false });
+      socket.emit('user:toggle-video', { isVideoOff: false });
+    } catch (err: any) {
+      console.warn('Permission request error:', err);
+      setPermissionError('Permission still denied: ' + (err.message || 'Please enable Camera & Microphone in your browser or device settings.'));
+    }
+  };
+
   // Flip Camera (Front vs Rear Camera on Android and mobile devices)
   const handleFlipCamera = async () => {
     setPermissionError(null);
@@ -809,7 +837,7 @@ export const MeetingRoomPage: React.FC = () => {
     setShowPresentationModal(false);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
       setShowPresentationModal(true);
-      setPermissionError('Mobile browsers restrict OS-level screen capture. Choose "Present Document & Slides" to present any file, photo, or slide live!');
+      setPermissionError('Mobile web browsers restrict OS-level screen capture. Use the PulseMeet Android App (APK) or choose "Present Document & Slides" below to present any file or photo live!');
       return;
     }
     try {
@@ -1253,17 +1281,25 @@ export const MeetingRoomPage: React.FC = () => {
 
       {/* Permission Warning Banner if device blocked */}
       {permissionError && (
-        <div className="bg-amber-500/20 border-b border-amber-500/40 text-amber-300 px-4 py-2 text-xs flex items-center justify-between z-30">
+        <div className="bg-amber-500/20 border-b border-amber-500/40 text-amber-300 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 z-30">
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
             <span>{permissionError}</span>
           </div>
-          <button
-            onClick={() => setPermissionError(null)}
-            className="text-amber-400 hover:text-white underline text-[11px]"
-          >
-            Dismiss
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleRequestPermissions}
+              className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] transition-colors"
+            >
+              Grant / Retry Access
+            </button>
+            <button
+              onClick={() => setPermissionError(null)}
+              className="text-amber-400 hover:text-white underline text-[11px]"
+            >
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 
