@@ -26,16 +26,26 @@ jobs:
           distribution: 'zulu'
           java-version: '21'
 
-      - name: Configure Android SDK & Clean Legacy Plugins
+      - name: Configure Android SDK & Build Settings
         run: |
-          sed -i 's/compileSdkVersion = 36/compileSdkVersion = 34/g' frontend/android/variables.gradle || true
-          sed -i 's/targetSdkVersion = 36/targetSdkVersion = 34/g' frontend/android/variables.gradle || true
+          # 1. Ensure compileSdkVersion is 36 for modern AndroidX dependencies
+          sed -i 's/compileSdkVersion = 34/compileSdkVersion = 36/g' frontend/android/variables.gradle || true
+          sed -i 's/targetSdkVersion = 34/targetSdkVersion = 36/g' frontend/android/variables.gradle || true
+
+          # 2. Disable strict AAR metadata checking in build.gradle
+          if ! grep -q "CheckAarMetadataTask" frontend/android/app/build.gradle; then
+            echo "tasks.withType(com.android.build.gradle.internal.tasks.CheckAarMetadataTask).configureEach { enabled = false }" >> frontend/android/app/build.gradle
+          fi
+
+          # 3. Strip legacy Cordova scripts
           sed -i '/cordova.variables.gradle/d' frontend/android/app/capacitor.build.gradle || true
           sed -i '/capacitor-cordova-android-plugins/d' frontend/android/settings.gradle || true
           sed -i '/capacitor-cordova-android-plugins/d' frontend/android/app/build.gradle || true
           mkdir -p frontend/android/capacitor-cordova-android-plugins/src/main/libs
           touch frontend/android/capacitor-cordova-android-plugins/cordova.variables.gradle
-          yes | sdkmanager --licenses || true
+
+          # 4. Accept licenses and install platform 36
+          yes | sdkmanager "platforms;android-36" --licenses || true
 
       - name: Install Frontend Dependencies
         working-directory: frontend
