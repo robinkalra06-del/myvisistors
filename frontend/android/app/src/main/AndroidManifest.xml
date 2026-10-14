@@ -35,9 +35,15 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- Foreground Service required for Android 14+ MediaProjection Screen Sharing -->
+        <service
+            android:name=".ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
     </application>
 
-    <!-- Essential Android Permissions for WebRTC, Camera, Mic, and Screen Sharing -->
+    <!-- Essential Android Permissions for WebRTC, Camera, Mic, Notifications, and Screen Sharing -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -46,6 +52,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Optional Hardware Features so the APK is installable across all Android devices -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />

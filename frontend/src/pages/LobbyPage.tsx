@@ -17,6 +17,12 @@ import {
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { Meeting } from '../types';
+import { acquireMediaStream } from '../utils/mediaUtils';
+import {
+  isAndroidScreenShareSupported,
+  requestAndroidMediaPermissions,
+  openAndroidAppSettings,
+} from '../utils/androidScreenShare';
 
 export const LobbyPage: React.FC = () => {
   const { code } = useParams<{ code: string }>();
@@ -69,13 +75,24 @@ export const LobbyPage: React.FC = () => {
 
     const startLocalStream = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: selectedVideoInput ? { deviceId: { exact: selectedVideoInput } } : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: selectedAudioInput ? { deviceId: { exact: selectedAudioInput } } : true,
-        });
+        let stream: MediaStream | null = null;
+        if (selectedVideoInput || selectedAudioInput) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: selectedVideoInput ? { deviceId: { exact: selectedVideoInput } } : { facingMode: 'user' },
+              audio: selectedAudioInput ? { deviceId: { exact: selectedAudioInput } } : true,
+            });
+          } catch (specificErr) {
+            console.warn('Selected device stream failed, falling back to acquireMediaStream:', specificErr);
+          }
+        }
 
-        if (!active) {
-          stream.getTracks().forEach((t) => t.stop());
+        if (!stream) {
+          stream = await acquireMediaStream('user');
+        }
+
+        if (!active || !stream) {
+          if (stream) stream.getTracks().forEach((t) => t.stop());
           return;
         }
 
@@ -114,9 +131,11 @@ export const LobbyPage: React.FC = () => {
         }
 
         // Enumerate devices
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        setAudioInputDevices(devices.filter((d) => d.kind === 'audioinput'));
-        setVideoInputDevices(devices.filter((d) => d.kind === 'videoinput'));
+        if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          setAudioInputDevices(devices.filter((d) => d.kind === 'audioinput'));
+          setVideoInputDevices(devices.filter((d) => d.kind === 'videoinput'));
+        }
       } catch (err) {
         console.warn('Camera/Mic permission error in green room:', err);
       }

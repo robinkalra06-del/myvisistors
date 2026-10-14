@@ -44,6 +44,14 @@ import { getSocket, disconnectSocket } from '../services/socket';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { Peer, ChatMessage, LiveCaption } from '../types';
+import { acquireMediaStream } from '../utils/mediaUtils';
+import {
+  isAndroidScreenShareSupported,
+  startAndroidScreenCaptureStream,
+  stopAndroidScreenCaptureStream,
+  requestAndroidMediaPermissions,
+  openAndroidAppSettings,
+} from '../utils/androidScreenShare';
 
 // Standard public STUN servers for WebRTC
 const ICE_SERVERS: RTCConfiguration = {
@@ -166,68 +174,6 @@ export const MeetingRoomPage: React.FC = () => {
     return null;
   }, [peers]);
 
-  // Progressive mobile & Android friendly media acquisition helper
-  const acquireMediaStream = async (facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream | null> => {
-    // Strategy 1: HD mobile front camera + audio
-    try {
-      return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
-    } catch (e1) {
-      console.warn('[Android Media] HD constraints failed, trying relaxed facingMode:', e1);
-    }
-
-    // Strategy 2: Relaxed facingMode + basic audio
-    try {
-      return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode } },
-        audio: true,
-      });
-    } catch (e2) {
-      console.warn('[Android Media] Relaxed facingMode failed, trying generic video+audio:', e2);
-    }
-
-    // Strategy 3: Generic boolean video + audio
-    try {
-      return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    } catch (e3) {
-      console.warn('[Android Media] Combined acquisition failed, trying sequential Android HAL acquisition:', e3);
-    }
-
-    // Strategy 4: Android HAL Sequential Acquisition (Separate Audio then Video)
-    let aTrack: MediaStreamTrack | null = null;
-    let vTrack: MediaStreamTrack | null = null;
-
-    try {
-      const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      aTrack = aStream.getAudioTracks()[0] || null;
-    } catch (errA) {
-      console.warn('[Android Media] Separate audio failed:', errA);
-    }
-
-    try {
-      const vStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facingMode } } });
-      vTrack = vStream.getVideoTracks()[0] || null;
-    } catch (errV1) {
-      try {
-        const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
-        vTrack = vStream.getVideoTracks()[0] || null;
-      } catch (errV2) {
-        console.warn('[Android Media] Separate video failed:', errV2);
-      }
-    }
-
-    const activeTracks: MediaStreamTrack[] = [];
-    if (aTrack) activeTracks.push(aTrack);
-    if (vTrack) activeTracks.push(vTrack);
-
-    if (activeTracks.length > 0) {
-      return new MediaStream(activeTracks);
-    }
-
-    return null;
-  };
 
   // 1. Initialize Local Media and Join Socket Room
   useEffect(() => {
@@ -792,6 +738,9 @@ export const MeetingRoomPage: React.FC = () => {
   const handleRequestPermissions = async () => {
     try {
       setPermissionError(null);
+      if (isAndroidScreenShareSupported()) {
+        requestAndroidMediaPermissions();
+      }
       const stream = await acquireMediaStream(cameraFacingMode);
       if (!stream) {
         setPermissionError('Camera and Microphone access was denied. Please check your browser or Android system app permissions.');
@@ -864,6 +813,7 @@ export const MeetingRoomPage: React.FC = () => {
 
   // Stop any active presentation (Screen share, Document/Slides, or Document Cam)
   const handleStopPresentation = async () => {
+    stopAndroidScreenCaptureStream();
     if (canvasAnimationIntervalRef.current) {
       clearInterval(canvasAnimationIntervalRef.current);
       canvasAnimationIntervalRef.current = null;
@@ -885,12 +835,40 @@ export const MeetingRoomPage: React.FC = () => {
     socket.emit('user:toggle-screen', { isScreenSharing: false });
   };
 
-  // Start Device Screen Share (Desktop or supported browser environment)
+  // Start Device Screen Share (Desktop or Android Native OS screen capture)
   const handleStartDeviceScreenShare = async () => {
     setShowPresentationModal(false);
+
+    // 1. Android Native OS Screen Capture via MediaProjection
+    if (isAndroidScreenShareSupported()) {
+      try {
+        const screenStream = await startAndroidScreenCaptureStream();
+        screenStreamRef.current = screenStream;
+        setLocalScreenStream(screenStream);
+        setIsScreenSharing(true);
+
+        const screenTrack = screenStream.getVideoTracks()[0];
+        await broadcastVideoTrack(screenTrack);
+
+        screenTrack.onended = () => {
+          handleStopPresentation();
+        };
+
+        socket.emit('user:toggle-screen', { isScreenSharing: true });
+        return;
+      } catch (err: any) {
+        if (err.name !== 'NotAllowedError') {
+          console.warn('Android screen sharing error:', err);
+          setPermissionError('Screen sharing error: ' + (err.message || 'Permission denied'));
+        }
+        return;
+      }
+    }
+
+    // 2. Standard Web getDisplayMedia (Desktop / Browser)
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
       setShowPresentationModal(true);
-      setPermissionError('Mobile web browsers restrict OS-level screen capture. Use the PulseMeet Android App (APK) or choose "Present Document & Slides" below to present any file or photo live!');
+      setPermissionError('Mobile web browsers restrict OS-level screen capture. Use the PulseMeet Android App (APK) or choose "Present Photos, Slides & Files" below to present any file or photo live!');
       return;
     }
     try {
@@ -1080,7 +1058,7 @@ export const MeetingRoomPage: React.FC = () => {
     if (isScreenSharing) {
       await handleStopPresentation();
     } else {
-      if (isMobileDevice || !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      if (isAndroidScreenShareSupported() || isMobileDevice || !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
         setShowPresentationModal(true);
       } else {
         await handleStartDeviceScreenShare();
@@ -1374,6 +1352,14 @@ export const MeetingRoomPage: React.FC = () => {
             >
               Grant / Retry Access
             </button>
+            {isAndroidScreenShareSupported() && (
+              <button
+                onClick={openAndroidAppSettings}
+                className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold transition-colors"
+              >
+                App Settings
+              </button>
+            )}
             <button
               onClick={() => setPermissionError(null)}
               className="text-amber-400 hover:text-white underline text-[11px]"
@@ -2272,7 +2258,55 @@ export const MeetingRoomPage: React.FC = () => {
             </p>
 
             <div className="space-y-3">
-              {/* Option 1: Present Documents, Slides & Photos (Direct native Android file picker) */}
+              {/* Option 1 for Android APK: Real OS-level Screen Sharing */}
+              {isAndroidScreenShareSupported() ? (
+                <button
+                  onClick={handleStartDeviceScreenShare}
+                  className="w-full p-4 rounded-2xl bg-gradient-to-r from-emerald-950/50 via-teal-900/40 to-slate-900 hover:from-emerald-900/60 hover:to-slate-800 border-2 border-emerald-500/60 text-left flex items-start gap-3.5 transition-all group shadow-lg"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/50 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
+                    <Share2 className="w-5 h-5 text-emerald-400" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-white group-hover:text-emerald-300">
+                        Share Entire Android Screen
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-300 border border-emerald-400/40">
+                        Live OS Screen
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300 mt-1 leading-normal">
+                      Cast your live phone screen. Switch between apps, show documents or websites while talking in the meeting.
+                    </p>
+                  </div>
+                </button>
+              ) : (
+                /* Desktop / Web getDisplayMedia option */
+                <button
+                  onClick={handleStartDeviceScreenShare}
+                  className="w-full p-4 rounded-2xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700/80 text-left flex items-start gap-3.5 transition-all group"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
+                    <Share2 className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-white group-hover:text-blue-300">
+                        Entire Device Screen
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        Desktop / Display
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1 leading-normal">
+                      Cast your entire system display or specific application window to everyone.
+                    </p>
+                  </div>
+                </button>
+              )}
+
+              {/* Option 2: Present Documents, Slides & Photos (File Picker) */}
               <label
                 htmlFor="mobile-presentation-file-input"
                 className="w-full p-4 rounded-2xl bg-gradient-to-r from-blue-900/40 to-indigo-900/30 hover:from-blue-900/60 hover:to-indigo-900/50 border border-blue-500/40 text-left flex items-start gap-3.5 transition-all group cursor-pointer block"
@@ -2285,17 +2319,17 @@ export const MeetingRoomPage: React.FC = () => {
                     <span className="text-sm font-bold text-white group-hover:text-blue-300">
                       Present Photos, Slides & Files
                     </span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                      Works on Android
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                      Slide Mode
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1 leading-normal">
-                    Tap to select presentation slides, PDF pages, photos, or screenshots from your phone to stream live.
+                    Select presentation slides, PDF pages, photos, or screenshots from your device to present.
                   </p>
                 </div>
               </label>
 
-              {/* Option 2: Present via Rear Camera (Document Cam) */}
+              {/* Option 3: Present via Rear Camera (Document Cam) */}
               <button
                 onClick={handleStartCameraPresentation}
                 className="w-full p-4 rounded-2xl bg-slate-800/60 hover:bg-slate-800 border border-slate-700 text-left flex items-start gap-3.5 transition-all group"
@@ -2310,30 +2344,7 @@ export const MeetingRoomPage: React.FC = () => {
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1 leading-normal">
-                    Stream your phone's rear camera as the main presentation screen to show physical notes, products, or paper documents.
-                  </p>
-                </div>
-              </button>
-
-              {/* Option 3: Entire Device Screen */}
-              <button
-                onClick={handleStartDeviceScreenShare}
-                className="w-full p-4 rounded-2xl bg-slate-800/40 hover:bg-slate-800 border border-slate-700/60 text-left flex items-start gap-3.5 transition-all group"
-              >
-                <div className="w-10 h-10 rounded-xl bg-slate-700/40 border border-slate-600/50 flex items-center justify-center shrink-0 group-hover:scale-110 transition-transform">
-                  <Share2 className="w-5 h-5 text-slate-300" />
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold text-slate-200 group-hover:text-white">
-                      Entire Device Screen
-                    </span>
-                    <span className="text-[10px] text-slate-500">
-                      Desktop / PWA
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-400 mt-1 leading-normal">
-                    Cast your entire system display or application window (Supported on desktop & native wrappers).
+                    Stream your phone's rear camera to display paper notes, whiteboard, or physical documents.
                   </p>
                 </div>
               </button>
