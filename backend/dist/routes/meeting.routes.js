@@ -1,0 +1,16 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const meeting_controller_1 = require("../controllers/meeting.controller");
+const auth_middleware_1 = require("../middlewares/auth.middleware");
+const router = (0, express_1.Router)();
+router.post('/instant', auth_middleware_1.optionalAuth, meeting_controller_1.createInstantMeeting);
+router.post('/schedule', auth_middleware_1.requireAuth, meeting_controller_1.scheduleMeeting);
+router.get('/my-meetings', auth_middleware_1.requireAuth, meeting_controller_1.getMyMeetings);
+router.get('/:code', meeting_controller_1.getMeetingByCode);
+router.post('/:code/verify-passcode', meeting_controller_1.verifyPasscode);
+router.put('/:code/settings', auth_middleware_1.requireAuth, meeting_controller_1.updateMeetingSettings);
+router.post('/:code/end', auth_middleware_1.requireAuth, meeting_controller_1.endMeeting);
+router.delete('/:id', auth_middleware_1.requireAuth, meeting_controller_1.deleteScheduledMeeting);
+router.get('/:code/livekit-token', auth_middleware_1.optionalAuth, meeting_controller_1.getLiveKitTokenForMeeting);
+exports.default = router;
