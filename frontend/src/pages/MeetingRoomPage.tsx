@@ -124,6 +124,7 @@ export const MeetingRoomPage: React.FC = () => {
   const recordedChunksRef = useRef<Blob[]>([]);
   const speechRecognitionRef = useRef<any>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const canvasAnimationIntervalRef = useRef<any>(null);
 
   const socket = getSocket();
 
@@ -165,6 +166,69 @@ export const MeetingRoomPage: React.FC = () => {
     return null;
   }, [peers]);
 
+  // Progressive mobile & Android friendly media acquisition helper
+  const acquireMediaStream = async (facingMode: 'user' | 'environment' = 'user'): Promise<MediaStream | null> => {
+    // Strategy 1: HD mobile front camera + audio
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+    } catch (e1) {
+      console.warn('[Android Media] HD constraints failed, trying relaxed facingMode:', e1);
+    }
+
+    // Strategy 2: Relaxed facingMode + basic audio
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode } },
+        audio: true,
+      });
+    } catch (e2) {
+      console.warn('[Android Media] Relaxed facingMode failed, trying generic video+audio:', e2);
+    }
+
+    // Strategy 3: Generic boolean video + audio
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e3) {
+      console.warn('[Android Media] Combined acquisition failed, trying sequential Android HAL acquisition:', e3);
+    }
+
+    // Strategy 4: Android HAL Sequential Acquisition (Separate Audio then Video)
+    let aTrack: MediaStreamTrack | null = null;
+    let vTrack: MediaStreamTrack | null = null;
+
+    try {
+      const aStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      aTrack = aStream.getAudioTracks()[0] || null;
+    } catch (errA) {
+      console.warn('[Android Media] Separate audio failed:', errA);
+    }
+
+    try {
+      const vStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facingMode } } });
+      vTrack = vStream.getVideoTracks()[0] || null;
+    } catch (errV1) {
+      try {
+        const vStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        vTrack = vStream.getVideoTracks()[0] || null;
+      } catch (errV2) {
+        console.warn('[Android Media] Separate video failed:', errV2);
+      }
+    }
+
+    const activeTracks: MediaStreamTrack[] = [];
+    if (aTrack) activeTracks.push(aTrack);
+    if (vTrack) activeTracks.push(vTrack);
+
+    if (activeTracks.length > 0) {
+      return new MediaStream(activeTracks);
+    }
+
+    return null;
+  };
+
   // 1. Initialize Local Media and Join Socket Room
   useEffect(() => {
     if (!code) return;
@@ -177,7 +241,7 @@ export const MeetingRoomPage: React.FC = () => {
     const setupCall = async () => {
       // Check if mediaDevices API is available
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setPermissionError('Camera/Microphone API is not supported in this browser or over insecure HTTP. Please use HTTPS or localhost.');
+        setPermissionError('Camera/Microphone API is not supported in this browser or over insecure HTTP. Please use HTTPS or the PulseMeet Android App.');
         socket.emit('join-room', {
           roomCode: code,
           guestName,
@@ -187,28 +251,12 @@ export const MeetingRoomPage: React.FC = () => {
         return;
       }
 
-      let stream: MediaStream | null = null;
+      // Brief delay (100ms) to allow previous hardware camera sessions (e.g. from Lobby) to cleanly release
+      await new Promise((res) => setTimeout(res, 100));
 
-      // Gracefully try audio+video, or audio-only, or video-only
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-          audio: { echoCancellation: true, noiseSuppression: true },
-        });
-      } catch (fullErr) {
-        console.warn('Could not get audio+video simultaneously, trying fallback:', fullErr);
-        try {
-          // Try audio only
-          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        } catch (audioErr) {
-          try {
-            // Try video only
-            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-          } catch (videoErr) {
-            console.warn('No camera or microphone could be accessed:', videoErr);
-            setPermissionError('Camera and Microphone could not be accessed. You may need to grant browser permissions or close other apps using your webcam.');
-          }
-        }
+      let stream: MediaStream | null = await acquireMediaStream('user');
+      if (!stream) {
+        setPermissionError('Camera or Microphone was blocked. Tap "Grant / Retry Access" above or check your Android app / browser permissions.');
       }
 
       // Keep mobile/Android screen awake during call
@@ -549,21 +597,24 @@ export const MeetingRoomPage: React.FC = () => {
       }
     };
 
-    // Remote Track handler: safely accumulates both video and audio tracks
+    // Remote Track handler: safely accumulates both video and audio tracks with fresh MediaStream instance
     pc.ontrack = (event) => {
       setPeers((prev) => {
         const next = new Map(prev);
         const existing = next.get(targetSocketId) || peerInfo;
-        let stream = existing.stream;
-        if (!stream) {
-          stream = event.streams[0] || new MediaStream();
-        }
-        if (event.track && !stream.getTracks().some((t) => t.id === event.track.id)) {
-          stream.addTrack(event.track);
-        }
+        const currentTracks = existing.stream ? existing.stream.getTracks() : [];
+        const newTrack = event.track;
+
+        // Keep all existing tracks except any previous track of the same kind/ID
+        const remainingTracks = currentTracks.filter((t) => t.id !== newTrack.id && t.kind !== newTrack.kind);
+        const allTracks = [...remainingTracks, newTrack];
+
+        // Fresh MediaStream instance ensures React useEffect([peer.stream]) triggers on all devices
+        const updatedStream = new MediaStream(allTracks);
+
         next.set(targetSocketId, {
           ...existing,
-          stream,
+          stream: updatedStream,
         });
         return next;
       });
@@ -697,14 +748,16 @@ export const MeetingRoomPage: React.FC = () => {
     setPermissionError(null);
     let videoTrack = localStreamRef.current?.getVideoTracks()[0];
 
-    if (isVideoOff || !videoTrack) {
+    if (isVideoOff || !videoTrack || videoTrack.readyState === 'ended') {
       // Turn ON camera
       try {
         if (!videoTrack || videoTrack.readyState === 'ended') {
-          const camStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: cameraFacingMode },
-          });
-          videoTrack = camStream.getVideoTracks()[0];
+          const camStream = await acquireMediaStream(cameraFacingMode);
+          videoTrack = camStream?.getVideoTracks()[0] || undefined;
+
+          if (!videoTrack) {
+            throw new Error('Camera device is unavailable or blocked');
+          }
 
           if (localStreamRef.current) {
             localStreamRef.current.addTrack(videoTrack);
@@ -714,6 +767,7 @@ export const MeetingRoomPage: React.FC = () => {
 
           if (localVideoRef.current) {
             localVideoRef.current.srcObject = localStreamRef.current;
+            localVideoRef.current.play().catch(() => {});
           }
 
           await broadcastVideoTrack(videoTrack);
@@ -724,7 +778,7 @@ export const MeetingRoomPage: React.FC = () => {
         socket.emit('user:toggle-video', { isVideoOff: false });
       } catch (err: any) {
         console.error('Camera toggle error:', err);
-        setPermissionError('Could not access camera. Please check your browser camera permission.');
+        setPermissionError('Could not access camera. Please check your Android or browser permissions.');
       }
     } else {
       // Turn OFF camera
@@ -738,22 +792,31 @@ export const MeetingRoomPage: React.FC = () => {
   const handleRequestPermissions = async () => {
     try {
       setPermissionError(null);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: cameraFacingMode },
-        audio: { echoCancellation: true, noiseSuppression: true },
-      });
+      const stream = await acquireMediaStream(cameraFacingMode);
+      if (!stream) {
+        setPermissionError('Camera and Microphone access was denied. Please check your browser or Android system app permissions.');
+        return;
+      }
       localStreamRef.current = stream;
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
       }
-      setIsVideoOff(false);
-      setIsAudioMuted(false);
       const audioTrack = stream.getAudioTracks()[0] || null;
       const videoTrack = stream.getVideoTracks()[0] || null;
-      if (audioTrack) await broadcastAudioTrack(audioTrack);
-      if (videoTrack) await broadcastVideoTrack(videoTrack);
-      socket.emit('user:toggle-audio', { isMuted: false });
-      socket.emit('user:toggle-video', { isVideoOff: false });
+
+      if (audioTrack) {
+        audioTrack.enabled = true;
+        setIsAudioMuted(false);
+        await broadcastAudioTrack(audioTrack);
+        socket.emit('user:toggle-audio', { isMuted: false });
+      }
+      if (videoTrack) {
+        videoTrack.enabled = true;
+        setIsVideoOff(false);
+        await broadcastVideoTrack(videoTrack);
+        socket.emit('user:toggle-video', { isVideoOff: false });
+      }
     } catch (err: any) {
       console.warn('Permission request error:', err);
       setPermissionError('Permission still denied: ' + (err.message || 'Please enable Camera & Microphone in your browser or device settings.'));
@@ -766,18 +829,12 @@ export const MeetingRoomPage: React.FC = () => {
     const nextFacingMode = cameraFacingMode === 'user' ? 'environment' : 'user';
 
     try {
-      let camStream: MediaStream;
-      try {
-        camStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { exact: nextFacingMode } },
-        });
-      } catch (exactErr) {
-        camStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: nextFacingMode },
-        });
-      }
+      const camStream = await acquireMediaStream(nextFacingMode);
+      const newVideoTrack = camStream?.getVideoTracks()[0];
 
-      const newVideoTrack = camStream.getVideoTracks()[0];
+      if (!newVideoTrack) {
+        throw new Error('Unable to switch camera device');
+      }
 
       if (localStreamRef.current) {
         const oldTrack = localStreamRef.current.getVideoTracks()[0];
@@ -792,6 +849,7 @@ export const MeetingRoomPage: React.FC = () => {
 
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = localStreamRef.current;
+        localVideoRef.current.play().catch(() => {});
       }
 
       await broadcastVideoTrack(newVideoTrack);
@@ -806,6 +864,10 @@ export const MeetingRoomPage: React.FC = () => {
 
   // Stop any active presentation (Screen share, Document/Slides, or Document Cam)
   const handleStopPresentation = async () => {
+    if (canvasAnimationIntervalRef.current) {
+      clearInterval(canvasAnimationIntervalRef.current);
+      canvasAnimationIntervalRef.current = null;
+    }
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
@@ -885,23 +947,40 @@ export const MeetingRoomPage: React.FC = () => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.src = urls[0];
-    img.onload = async () => {
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(0, 0, canvas!.width, canvas!.height);
+    const paintSlideToCanvas = (img: HTMLImageElement) => {
+      const cvs = presentationCanvasRef.current;
+      if (!cvs) return;
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return;
 
-      const scale = Math.min((canvas!.width - 80) / img.width, (canvas!.height - 80) / img.height);
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(0, 0, cvs.width, cvs.height);
+
+      const scale = Math.min((cvs.width - 80) / img.width, (cvs.height - 80) / img.height);
       const w = img.width * scale;
       const h = img.height * scale;
-      const x = (canvas!.width - w) / 2;
-      const y = (canvas!.height - h) / 2;
+      const x = (cvs.width - w) / 2;
+      const y = (cvs.height - h) / 2;
 
       ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
       ctx.shadowBlur = 20;
       ctx.drawImage(img, x, y, w, h);
       ctx.shadowColor = 'transparent';
+
+      if (canvasAnimationIntervalRef.current) clearInterval(canvasAnimationIntervalRef.current);
+      canvasAnimationIntervalRef.current = setInterval(() => {
+        const c = cvs.getContext('2d');
+        if (c && img.complete) {
+          c.drawImage(img, x, y, w, h);
+        }
+      }, 100);
+    };
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = urls[0];
+    img.onload = async () => {
+      paintSlideToCanvas(img);
 
       try {
         const stream = (canvas as any).captureStream(25);
@@ -927,26 +1006,37 @@ export const MeetingRoomPage: React.FC = () => {
     setCurrentSlideIndex(newIndex);
     const canvas = presentationCanvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
 
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.src = presentationSlides[newIndex];
     img.onload = () => {
-      ctx.fillStyle = '#090d16';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const cvs = presentationCanvasRef.current;
+      if (!cvs) return;
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return;
 
-      const scale = Math.min((canvas.width - 80) / img.width, (canvas.height - 80) / img.height);
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(0, 0, cvs.width, cvs.height);
+
+      const scale = Math.min((cvs.width - 80) / img.width, (cvs.height - 80) / img.height);
       const w = img.width * scale;
       const h = img.height * scale;
-      const x = (canvas.width - w) / 2;
-      const y = (canvas.height - h) / 2;
+      const x = (cvs.width - w) / 2;
+      const y = (cvs.height - h) / 2;
 
       ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
       ctx.shadowBlur = 20;
       ctx.drawImage(img, x, y, w, h);
       ctx.shadowColor = 'transparent';
+
+      if (canvasAnimationIntervalRef.current) clearInterval(canvasAnimationIntervalRef.current);
+      canvasAnimationIntervalRef.current = setInterval(() => {
+        const c = cvs.getContext('2d');
+        if (c && img.complete) {
+          c.drawImage(img, x, y, w, h);
+        }
+      }, 100);
     };
   };
 
@@ -2321,9 +2411,11 @@ const RemoteVideoTile: React.FC<{
     if (peer.stream) {
       if (videoRef.current) {
         videoRef.current.srcObject = peer.stream;
+        videoRef.current.play().catch((e) => console.warn('[Video] Remote play catch:', e));
       }
       if (audioRef.current) {
         audioRef.current.srcObject = peer.stream;
+        audioRef.current.play().catch((e) => console.warn('[Audio] Remote play catch:', e));
       }
     }
   }, [peer.stream]);

@@ -50,7 +50,7 @@ public class MainActivity extends BridgeActivity {
                 settings.setAllowContentAccess(true);
                 settings.setDatabaseEnabled(true);
 
-                webView.setWebChromeClient(new WebChromeClient() {
+                webView.setWebChromeClient(new com.getcapacitor.BridgeWebChromeClient(this.bridge) {
                     @Override
                     public void onPermissionRequest(final PermissionRequest request) {
                         MainActivity.this.runOnUiThread(new Runnable() {
