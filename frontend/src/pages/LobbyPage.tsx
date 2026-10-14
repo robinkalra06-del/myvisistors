@@ -70,7 +70,7 @@ export const LobbyPage: React.FC = () => {
     const startLocalStream = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: selectedVideoInput ? { deviceId: { exact: selectedVideoInput } } : true,
+          video: selectedVideoInput ? { deviceId: { exact: selectedVideoInput } } : { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: selectedAudioInput ? { deviceId: { exact: selectedAudioInput } } : true,
         });
 

@@ -32,6 +32,8 @@ import {
   Palette,
   AlertTriangle,
   StopCircle,
+  SwitchCamera,
+  MoreHorizontal,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { getSocket, disconnectSocket } from '../services/socket';
@@ -75,6 +77,11 @@ export const MeetingRoomPage: React.FC = () => {
   const [isCaptionsOn, setIsCaptionsOn] = useState(false);
   const [isVirtualBgOn, setIsVirtualBgOn] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>('user');
+  const [showMobileMoreSheet, setShowMobileMoreSheet] = useState(false);
+  const isMobileDevice = useMemo(() => {
+    return typeof navigator !== 'undefined' && /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  }, []);
 
   // Remote peers & waiting room
   const [peers, setPeers] = useState<Map<string, Peer>>(new Map());
@@ -172,7 +179,7 @@ export const MeetingRoomPage: React.FC = () => {
       // Gracefully try audio+video, or audio-only, or video-only
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
           audio: { echoCancellation: true, noiseSuppression: true },
         });
       } catch (fullErr) {
@@ -183,12 +190,19 @@ export const MeetingRoomPage: React.FC = () => {
         } catch (audioErr) {
           try {
             // Try video only
-            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
           } catch (videoErr) {
             console.warn('No camera or microphone could be accessed:', videoErr);
             setPermissionError('Camera and Microphone could not be accessed. You may need to grant browser permissions or close other apps using your webcam.');
           }
         }
+      }
+
+      // Keep mobile/Android screen awake during call
+      if ('wakeLock' in navigator) {
+        try {
+          (navigator as any).wakeLock.request('screen').catch(() => {});
+        } catch (e) {}
       }
 
       if (!mounted) {
@@ -683,7 +697,7 @@ export const MeetingRoomPage: React.FC = () => {
       try {
         if (!videoTrack || videoTrack.readyState === 'ended') {
           const camStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: cameraFacingMode },
           });
           videoTrack = camStream.getVideoTracks()[0];
 
@@ -715,6 +729,50 @@ export const MeetingRoomPage: React.FC = () => {
     }
   };
 
+  // Flip Camera (Front vs Rear Camera on Android and mobile devices)
+  const handleFlipCamera = async () => {
+    setPermissionError(null);
+    const nextFacingMode = cameraFacingMode === 'user' ? 'environment' : 'user';
+
+    try {
+      let camStream: MediaStream;
+      try {
+        camStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { exact: nextFacingMode } },
+        });
+      } catch (exactErr) {
+        camStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: nextFacingMode },
+        });
+      }
+
+      const newVideoTrack = camStream.getVideoTracks()[0];
+
+      if (localStreamRef.current) {
+        const oldTrack = localStreamRef.current.getVideoTracks()[0];
+        if (oldTrack) {
+          oldTrack.stop();
+          localStreamRef.current.removeTrack(oldTrack);
+        }
+        localStreamRef.current.addTrack(newVideoTrack);
+      } else {
+        localStreamRef.current = camStream;
+      }
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+
+      await broadcastVideoTrack(newVideoTrack);
+      setCameraFacingMode(nextFacingMode);
+      setIsVideoOff(false);
+      socket.emit('user:toggle-video', { isVideoOff: false });
+    } catch (err: any) {
+      console.warn('Failed to switch camera:', err);
+      setPermissionError('Could not flip camera: ' + (err.message || 'Device camera switch failed'));
+    }
+  };
+
   // Toggle Screen Sharing (Full presentation support with safe browser fallback)
   const handleToggleScreenShare = async () => {
     setPermissionError(null);
@@ -735,6 +793,10 @@ export const MeetingRoomPage: React.FC = () => {
       socket.emit('user:toggle-screen', { isScreenSharing: false });
     } else {
       // Start Screen Sharing
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        setPermissionError('Screen sharing is not supported by your current browser or mobile environment. You can still participate with full video and audio!');
+        return;
+      }
       try {
         let screenStream: MediaStream;
         try {
@@ -992,7 +1054,7 @@ export const MeetingRoomPage: React.FC = () => {
   const hasActivePresentation = isScreenSharing || !!remotePresenter;
 
   return (
-    <div className="h-screen w-screen bg-slate-950 text-white flex flex-col overflow-hidden select-none">
+    <div className="h-screen h-[100dvh] w-screen bg-slate-950 text-white flex flex-col overflow-hidden select-none">
       
       {/* Top Header Bar */}
       <header className="h-14 px-4 border-b border-slate-800/80 bg-slate-900/60 backdrop-blur flex items-center justify-between z-20 shrink-0">
@@ -1249,7 +1311,7 @@ export const MeetingRoomPage: React.FC = () => {
 
         {/* Collapsible Drawers (Chat, Participants, Info) */}
         {activeDrawer === 'chat' && (
-          <aside className="w-80 sm:w-96 border-l border-slate-800 bg-slate-900 flex flex-col z-40 animate-in slide-in-from-right duration-200">
+          <aside className="fixed md:relative inset-y-0 right-0 w-full sm:w-96 border-l border-slate-800 bg-slate-900 flex flex-col z-50 animate-in slide-in-from-right duration-200 shadow-2xl">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold flex items-center gap-2">
                 <MessageSquare className="w-4 h-4 text-blue-400" />
@@ -1307,7 +1369,7 @@ export const MeetingRoomPage: React.FC = () => {
         )}
 
         {activeDrawer === 'participants' && (
-          <aside className="w-80 sm:w-96 border-l border-slate-800 bg-slate-900 flex flex-col z-40 animate-in slide-in-from-right duration-200">
+          <aside className="fixed md:relative inset-y-0 right-0 w-full sm:w-96 border-l border-slate-800 bg-slate-900 flex flex-col z-50 animate-in slide-in-from-right duration-200 shadow-2xl">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold flex items-center gap-2">
                 <Users className="w-4 h-4 text-blue-400" />
@@ -1407,7 +1469,7 @@ export const MeetingRoomPage: React.FC = () => {
         )}
 
         {activeDrawer === 'info' && (
-          <aside className="w-80 sm:w-96 border-l border-slate-800 bg-slate-900 flex flex-col z-40 animate-in slide-in-from-right duration-200">
+          <aside className="fixed md:relative inset-y-0 right-0 w-full sm:w-96 border-l border-slate-800 bg-slate-900 flex flex-col z-50 animate-in slide-in-from-right duration-200 shadow-2xl">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold flex items-center gap-2">
                 <Info className="w-4 h-4 text-blue-400" />
@@ -1454,203 +1516,430 @@ export const MeetingRoomPage: React.FC = () => {
 
       </div>
 
-      {/* Floating Bottom Meeting Controls Bar */}
-      <footer className="h-20 px-4 bg-slate-900 border-t border-slate-800 flex items-center justify-between z-30 shrink-0">
+      {/* Bottom Meeting Controls Bar (Responsive: Mobile Row & Desktop Row) */}
+      <footer className="h-20 px-3 sm:px-4 bg-slate-900 border-t border-slate-800 flex items-center justify-between z-30 shrink-0">
         
-        <div className="hidden md:flex items-center gap-3 text-xs text-slate-400">
-          <span className="font-mono font-medium">{formattedTime}</span>
-          <span>|</span>
-          <span className="font-mono">{code}</span>
+        {/* DESKTOP LAYOUT (>= md screens) */}
+        <div className="hidden md:flex items-center justify-between w-full">
+          {/* Left info pill */}
+          <div className="flex items-center gap-3 text-xs text-slate-400">
+            <span className="font-mono font-medium">{formattedTime}</span>
+            <span>|</span>
+            <span className="font-mono">{code}</span>
+          </div>
+
+          {/* Desktop Center Action Controls */}
+          <div className="flex items-center gap-2.5 sm:gap-3 mx-auto">
+            {/* Mic toggle */}
+            <button
+              onClick={handleToggleMic}
+              className={`p-3.5 rounded-full transition-all shadow-md ${
+                isAudioMuted
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+              }`}
+              title={isAudioMuted ? 'Turn on microphone' : 'Turn off microphone'}
+            >
+              {isAudioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            </button>
+
+            {/* Camera toggle */}
+            <button
+              onClick={handleToggleCamera}
+              className={`p-3.5 rounded-full transition-all shadow-md ${
+                isVideoOff
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+              }`}
+              title={isVideoOff ? 'Turn on camera' : 'Turn off camera'}
+            >
+              {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+            </button>
+
+            {/* Screen Share */}
+            <button
+              onClick={handleToggleScreenShare}
+              className={`p-3.5 rounded-full transition-all shadow-md ${
+                isScreenSharing
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+              }`}
+              title={isScreenSharing ? 'Stop presenting' : 'Present now'}
+            >
+              <Share2 className="w-5 h-5" />
+            </button>
+
+            {/* Raise Hand */}
+            <button
+              onClick={handleToggleRaiseHand}
+              className={`p-3.5 rounded-full transition-all shadow-md ${
+                isHandRaised
+                  ? 'bg-amber-500 hover:bg-amber-600 text-black'
+                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+              }`}
+              title={isHandRaised ? 'Lower hand' : 'Raise hand'}
+            >
+              <Hand className="w-5 h-5" />
+            </button>
+
+            {/* Reactions Picker */}
+            <div className="relative">
+              <button
+                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                className="p-3.5 rounded-full bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition-all shadow-md"
+                title="Send a reaction"
+              >
+                <Smile className="w-5 h-5" />
+              </button>
+
+              {showEmojiPicker && (
+                <div className="absolute bottom-16 left-1/2 -translate-x-1/2 p-2 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl flex items-center gap-2 z-50 animate-in fade-in zoom-in-95">
+                  {['❤️', '👏', '👍', '🎉', '🔥', '😂'].map((emoji) => (
+                    <button
+                      key={emoji}
+                      onClick={() => handleSendReaction(emoji)}
+                      className="p-2 text-2xl hover:scale-125 transition-transform"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Live Captions */}
+            <button
+              onClick={handleToggleCaptions}
+              className={`p-3.5 rounded-full transition-all shadow-md ${
+                isCaptionsOn
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+              }`}
+              title={isCaptionsOn ? 'Turn off captions' : 'Turn on captions'}
+            >
+              <Subtitles className="w-5 h-5" />
+            </button>
+
+            {/* Background Blur */}
+            <button
+              onClick={() => setIsVirtualBgOn(!isVirtualBgOn)}
+              className={`p-3.5 rounded-full transition-all shadow-md ${
+                isVirtualBgOn
+                  ? 'bg-purple-600 text-white'
+                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+              }`}
+              title="Toggle background blur"
+            >
+              <Palette className="w-5 h-5" />
+            </button>
+
+            {/* Cloud Recording (Host) */}
+            {isHost && (
+              <button
+                onClick={handleToggleRecording}
+                className={`p-3.5 rounded-full transition-all shadow-md ${
+                  isRecording
+                    ? 'bg-rose-600 text-white animate-pulse'
+                    : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+                }`}
+                title={isRecording ? 'Stop Cloud Recording' : 'Start Cloud Recording'}
+              >
+                <Disc className="w-5 h-5" />
+              </button>
+            )}
+
+            {/* Leave / End Call */}
+            <button
+              onClick={isHost ? handleEndMeetingForAll : handleLeaveMeeting}
+              className="px-5 py-3 rounded-full bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs flex items-center gap-2 shadow-lg shadow-rose-600/30 transition-all"
+              title="Leave call"
+            >
+              <PhoneOff className="w-4 h-4" />
+              <span>{isHost ? 'End for All' : 'Leave'}</span>
+            </button>
+          </div>
+
+          {/* Desktop Right Drawer Action Triggers */}
+          <div className="flex items-center gap-2">
+            {isHost && (
+              <button
+                onClick={() => setShowSecurityModal(true)}
+                className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors"
+                title="Host Safety Controls"
+              >
+                <Shield className="w-4 h-4" />
+              </button>
+            )}
+
+            <button
+              onClick={() => setActiveDrawer(activeDrawer === 'info' ? null : 'info')}
+              className={`p-3 rounded-xl border border-slate-700 transition-colors ${
+                activeDrawer === 'info' ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+              }`}
+              title="Meeting details"
+            >
+              <Info className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={() => setActiveDrawer(activeDrawer === 'participants' ? null : 'participants')}
+              className={`p-3 rounded-xl border border-slate-700 transition-colors relative ${
+                activeDrawer === 'participants' ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+              }`}
+              title="People"
+            >
+              <Users className="w-4 h-4" />
+              {waitingUsers.length > 0 && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500" />
+              )}
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveDrawer(activeDrawer === 'chat' ? null : 'chat');
+                setUnreadChatCount(0);
+              }}
+              className={`p-3 rounded-xl border border-slate-700 transition-colors relative ${
+                activeDrawer === 'chat' ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+              }`}
+              title="Chat with everyone"
+            >
+              <MessageSquare className="w-4 h-4" />
+              {unreadChatCount > 0 && (
+                <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-500 text-white">
+                  {unreadChatCount}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3 mx-auto md:mx-0">
-          
-          {/* 1. Mic toggle */}
+        {/* MOBILE LAYOUT (< md screens: Android & iPhone) */}
+        <div className="flex md:hidden items-center justify-between w-full px-1">
+          {/* Mobile Mic */}
           <button
             onClick={handleToggleMic}
-            className={`p-3.5 rounded-full transition-all shadow-md ${
+            className={`p-3 rounded-full transition-all shadow-md ${
               isAudioMuted
-                ? 'bg-rose-600 hover:bg-rose-700 text-white'
-                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+                ? 'bg-rose-600 text-white'
+                : 'bg-slate-800 text-white border border-slate-700'
             }`}
-            title={isAudioMuted ? 'Turn on microphone' : 'Turn off microphone'}
+            title="Toggle Mic"
           >
-            {isAudioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            {isAudioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5 text-emerald-400" />}
           </button>
 
-          {/* 2. Camera toggle */}
+          {/* Mobile Camera */}
           <button
             onClick={handleToggleCamera}
-            className={`p-3.5 rounded-full transition-all shadow-md ${
+            className={`p-3 rounded-full transition-all shadow-md ${
               isVideoOff
-                ? 'bg-rose-600 hover:bg-rose-700 text-white'
-                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+                ? 'bg-rose-600 text-white'
+                : 'bg-slate-800 text-white border border-slate-700'
             }`}
-            title={isVideoOff ? 'Turn on camera' : 'Turn off camera'}
+            title="Toggle Camera"
           >
             {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
           </button>
 
-          {/* 3. Screen Share */}
-          <button
-            onClick={handleToggleScreenShare}
-            className={`p-3.5 rounded-full transition-all shadow-md ${
-              isScreenSharing
-                ? 'bg-blue-600 hover:bg-blue-700 text-white'
-                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
-            }`}
-            title={isScreenSharing ? 'Stop presenting' : 'Present now'}
-          >
-            <Share2 className="w-5 h-5" />
-          </button>
-
-          {/* 4. Raise Hand */}
-          <button
-            onClick={handleToggleRaiseHand}
-            className={`p-3.5 rounded-full transition-all shadow-md ${
-              isHandRaised
-                ? 'bg-amber-500 hover:bg-amber-600 text-black'
-                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
-            }`}
-            title={isHandRaised ? 'Lower hand' : 'Raise hand'}
-          >
-            <Hand className="w-5 h-5" />
-          </button>
-
-          {/* 5. Reactions Picker */}
-          <div className="relative">
+          {/* Mobile Flip Camera (Front/Rear switch) */}
+          {!isVideoOff && (
             <button
-              onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-              className="p-3.5 rounded-full bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 transition-all shadow-md"
-              title="Send a reaction"
+              onClick={handleFlipCamera}
+              className="p-3 rounded-full bg-slate-800 text-slate-200 border border-slate-700 transition-all shadow-md active:rotate-180 duration-200"
+              title="Flip Front/Rear Camera"
             >
-              <Smile className="w-5 h-5" />
-            </button>
-
-            {showEmojiPicker && (
-              <div className="absolute bottom-16 left-1/2 -translate-x-1/2 p-2 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl flex items-center gap-2 z-50 animate-in fade-in zoom-in-95">
-                {['❤️', '👏', '👍', '🎉', '🔥', '😂'].map((emoji) => (
-                  <button
-                    key={emoji}
-                    onClick={() => handleSendReaction(emoji)}
-                    className="p-2 text-2xl hover:scale-125 transition-transform"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* 6. Live Speech Captions */}
-          <button
-            onClick={handleToggleCaptions}
-            className={`p-3.5 rounded-full transition-all shadow-md ${
-              isCaptionsOn
-                ? 'bg-blue-600 text-white'
-                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
-            }`}
-            title={isCaptionsOn ? 'Turn off captions' : 'Turn on captions'}
-          >
-            <Subtitles className="w-5 h-5" />
-          </button>
-
-          {/* 7. Virtual Background Blur */}
-          <button
-            onClick={() => setIsVirtualBgOn(!isVirtualBgOn)}
-            className={`p-3.5 rounded-full transition-all shadow-md ${
-              isVirtualBgOn
-                ? 'bg-purple-600 text-white'
-                : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
-            }`}
-            title="Toggle background blur"
-          >
-            <Palette className="w-5 h-5" />
-          </button>
-
-          {/* 8. Cloud Recording (Host only) */}
-          {isHost && (
-            <button
-              onClick={handleToggleRecording}
-              className={`p-3.5 rounded-full transition-all shadow-md ${
-                isRecording
-                  ? 'bg-rose-600 text-white animate-pulse'
-                  : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
-              }`}
-              title={isRecording ? 'Stop Cloud Recording' : 'Start Cloud Recording'}
-            >
-              <Disc className="w-5 h-5" />
+              <SwitchCamera className="w-5 h-5" />
             </button>
           )}
 
-          {/* 9. Leave / End Call */}
-          <button
-            onClick={isHost ? handleEndMeetingForAll : handleLeaveMeeting}
-            className="px-5 py-3 rounded-full bg-rose-600 hover:bg-rose-700 text-white font-semibold text-xs flex items-center gap-2 shadow-lg shadow-rose-600/30 transition-all"
-            title="Leave call"
-          >
-            <PhoneOff className="w-4 h-4" />
-            <span className="hidden sm:inline">{isHost ? 'End for All' : 'Leave'}</span>
-          </button>
-
-        </div>
-
-        {/* Right Drawer Action Triggers */}
-        <div className="flex items-center gap-2">
-          {isHost && (
-            <button
-              onClick={() => setShowSecurityModal(true)}
-              className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors"
-              title="Host Safety Controls"
-            >
-              <Shield className="w-4 h-4" />
-            </button>
-          )}
-
-          <button
-            onClick={() => setActiveDrawer(activeDrawer === 'info' ? null : 'info')}
-            className={`p-3 rounded-xl border border-slate-700 transition-colors ${
-              activeDrawer === 'info' ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-            }`}
-            title="Meeting details"
-          >
-            <Info className="w-4 h-4" />
-          </button>
-
-          <button
-            onClick={() => setActiveDrawer(activeDrawer === 'participants' ? null : 'participants')}
-            className={`p-3 rounded-xl border border-slate-700 transition-colors relative ${
-              activeDrawer === 'participants' ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
-            }`}
-            title="People"
-          >
-            <Users className="w-4 h-4" />
-            {waitingUsers.length > 0 && (
-              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500" />
-            )}
-          </button>
-
+          {/* Mobile In-Call Chat */}
           <button
             onClick={() => {
               setActiveDrawer(activeDrawer === 'chat' ? null : 'chat');
               setUnreadChatCount(0);
             }}
-            className={`p-3 rounded-xl border border-slate-700 transition-colors relative ${
-              activeDrawer === 'chat' ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+            className={`p-3 rounded-full border border-slate-700 transition-colors relative ${
+              activeDrawer === 'chat' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300'
             }`}
-            title="Chat with everyone"
+            title="Chat"
           >
-            <MessageSquare className="w-4 h-4" />
+            <MessageSquare className="w-5 h-5" />
             {unreadChatCount > 0 && (
-              <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-500 text-white">
+              <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-blue-500 text-white">
                 {unreadChatCount}
               </span>
             )}
           </button>
 
+          {/* Mobile More Options (...) */}
+          <button
+            onClick={() => setShowMobileMoreSheet(!showMobileMoreSheet)}
+            className={`p-3 rounded-full border border-slate-700 transition-all ${
+              showMobileMoreSheet ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300'
+            }`}
+            title="More Options"
+          >
+            <MoreHorizontal className="w-5 h-5" />
+          </button>
+
+          {/* Mobile Leave Button */}
+          <button
+            onClick={isHost ? handleEndMeetingForAll : handleLeaveMeeting}
+            className="p-3 rounded-full bg-rose-600 text-white shadow-lg shadow-rose-600/30 transition-all"
+            title="Leave call"
+          >
+            <PhoneOff className="w-5 h-5" />
+          </button>
         </div>
 
       </footer>
+
+      {/* MOBILE MORE OPTIONS BOTTOM SHEET */}
+      {showMobileMoreSheet && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60 backdrop-blur-sm md:hidden animate-in fade-in duration-150">
+          <div
+            className="absolute inset-0"
+            onClick={() => setShowMobileMoreSheet(false)}
+          />
+          <div className="relative bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 space-y-4 shadow-2xl max-h-[80vh] overflow-y-auto animate-in slide-in-from-bottom duration-200">
+            
+            {/* Handle drag bar */}
+            <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto -mt-1 mb-2" />
+
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <span className="text-sm font-bold text-slate-200">More Activities</span>
+              <button onClick={() => setShowMobileMoreSheet(false)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Reaction Emoji Strip */}
+            <div className="flex items-center justify-between p-2 rounded-2xl bg-slate-800/80">
+              {['❤️', '👏', '👍', '🎉', '🔥', '😂'].map((emoji) => (
+                <button
+                  key={emoji}
+                  onClick={() => {
+                    handleSendReaction(emoji);
+                    setShowMobileMoreSheet(false);
+                  }}
+                  className="p-2 text-2xl active:scale-125 transition-transform"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+
+            {/* Grid of Action Cards */}
+            <div className="grid grid-cols-2 gap-2.5 text-xs font-medium">
+              
+              <button
+                onClick={() => {
+                  handleToggleScreenShare();
+                  setShowMobileMoreSheet(false);
+                }}
+                className={`p-3 rounded-2xl flex items-center gap-2.5 border transition-all ${
+                  isScreenSharing ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-slate-800/70 border-slate-700/60 text-slate-200'
+                }`}
+              >
+                <Share2 className="w-4 h-4 text-blue-400" />
+                <span>{isScreenSharing ? 'Stop Presenting' : 'Share Screen'}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  handleToggleRaiseHand();
+                  setShowMobileMoreSheet(false);
+                }}
+                className={`p-3 rounded-2xl flex items-center gap-2.5 border transition-all ${
+                  isHandRaised ? 'bg-amber-500/20 border-amber-500 text-amber-400' : 'bg-slate-800/70 border-slate-700/60 text-slate-200'
+                }`}
+              >
+                <Hand className="w-4 h-4 text-amber-400" />
+                <span>{isHandRaised ? 'Lower Hand' : 'Raise Hand'}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setActiveDrawer('participants');
+                  setShowMobileMoreSheet(false);
+                }}
+                className="p-3 rounded-2xl flex items-center gap-2.5 bg-slate-800/70 border border-slate-700/60 text-slate-200"
+              >
+                <Users className="w-4 h-4 text-emerald-400" />
+                <span>People ({allPeersArray.length + 1})</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  handleToggleCaptions();
+                  setShowMobileMoreSheet(false);
+                }}
+                className={`p-3 rounded-2xl flex items-center gap-2.5 border transition-all ${
+                  isCaptionsOn ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-slate-800/70 border-slate-700/60 text-slate-200'
+                }`}
+              >
+                <Subtitles className="w-4 h-4 text-purple-400" />
+                <span>{isCaptionsOn ? 'Captions On' : 'Live Captions'}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setIsVirtualBgOn(!isVirtualBgOn);
+                  setShowMobileMoreSheet(false);
+                }}
+                className={`p-3 rounded-2xl flex items-center gap-2.5 border transition-all ${
+                  isVirtualBgOn ? 'bg-purple-600/20 border-purple-500 text-purple-400' : 'bg-slate-800/70 border-slate-700/60 text-slate-200'
+                }`}
+              >
+                <Palette className="w-4 h-4 text-purple-400" />
+                <span>Blur Background</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setActiveDrawer('info');
+                  setShowMobileMoreSheet(false);
+                }}
+                className="p-3 rounded-2xl flex items-center gap-2.5 bg-slate-800/70 border border-slate-700/60 text-slate-200"
+              >
+                <Info className="w-4 h-4 text-cyan-400" />
+                <span>Meeting Info</span>
+              </button>
+
+              {isHost && (
+                <>
+                  <button
+                    onClick={() => {
+                      setShowSecurityModal(true);
+                      setShowMobileMoreSheet(false);
+                    }}
+                    className="p-3 rounded-2xl flex items-center gap-2.5 bg-slate-800/70 border border-slate-700/60 text-slate-200"
+                  >
+                    <Shield className="w-4 h-4 text-amber-400" />
+                    <span>Host Safety</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleToggleRecording();
+                      setShowMobileMoreSheet(false);
+                    }}
+                    className={`p-3 rounded-2xl flex items-center gap-2.5 border transition-all ${
+                      isRecording ? 'bg-rose-600/20 border-rose-500 text-rose-400 animate-pulse' : 'bg-slate-800/70 border-slate-700/60 text-slate-200'
+                    }`}
+                  >
+                    <Disc className="w-4 h-4 text-rose-400" />
+                    <span>{isRecording ? 'Stop Recording' : 'Record Call'}</span>
+                  </button>
+                </>
+              )}
+
+            </div>
+
+          </div>
+        </div>
+      )}
 
       {/* Host Safety Modal */}
       {showSecurityModal && (
