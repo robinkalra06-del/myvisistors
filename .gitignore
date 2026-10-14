@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build Outputs
+dist/
+build/
+
+# Environment Variables
+.env
+.env.local
+.env.production
+
+# Uploaded meeting recordings (keep folder, ignore video binaries)
+backend/uploads/recordings/*
+!backend/uploads/recordings/.gitkeep
+
+# System & IDE files
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vscode/
+.idea/
