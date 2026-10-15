@@ -455,10 +455,9 @@ export const MeetingRoomPage: React.FC = () => {
       const pc = peerConnections.current.get(senderSocketId);
       if (pc) {
         try {
-          if ((pc as any).restartIce) (pc as any).restartIce();
           if (pc.signalingState === 'stable') {
-            console.log(`[WebRTC] Peer ${senderSocketId} requested renegotiation, sending ICE restart offer...`);
-            const offer = await pc.createOffer({ iceRestart: true });
+            console.log(`[WebRTC] Peer ${senderSocketId} requested renegotiation, sending offer...`);
+            const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             socket.emit('signal:offer', { targetSocketId: senderSocketId, sdp: offer });
           }
@@ -781,21 +780,30 @@ export const MeetingRoomPage: React.FC = () => {
         let videoTransceiver = pc.getTransceivers().find(
           (t) => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video'
         );
+        let needsRenegotiation = false;
+
         if (!videoTransceiver && track) {
           videoTransceiver = pc.addTransceiver(track, { direction: 'sendrecv' });
+          needsRenegotiation = true;
         }
+
         if (videoTransceiver) {
           if (videoTransceiver.direction !== 'sendrecv') {
             videoTransceiver.direction = 'sendrecv';
+            needsRenegotiation = true;
           }
           if (videoTransceiver.sender) {
             await videoTransceiver.sender.replaceTrack(track);
           }
+          // If current negotiated direction is not sendrecv, renegotiate SDP
+          if (videoTransceiver.currentDirection !== 'sendrecv') {
+            needsRenegotiation = true;
+          }
         }
 
-        // CRITICAL: Always renegotiate SDP when replacing or broadcasting video track
-        // so that active SDP m-line updates to sendrecv and the remote peer immediately decodes the new stream
-        await renegotiatePeer(targetSocketId, pc);
+        if (needsRenegotiation) {
+          await renegotiatePeer(targetSocketId, pc);
+        }
       } catch (e) {
         console.warn(`Error broadcasting video track to ${targetSocketId}:`, e);
       }
@@ -1637,7 +1645,7 @@ export const MeetingRoomPage: React.FC = () => {
                     className="w-full h-full object-contain"
                   />
                 ) : (
-                  <RemoteScreenShareView stream={remotePresenterStream || remotePresenter?.stream} />
+                  <RemoteScreenShareView stream={remotePresenterStream} />
                 )}
 
                 {/* Floating slide navigation bar for presenter */}

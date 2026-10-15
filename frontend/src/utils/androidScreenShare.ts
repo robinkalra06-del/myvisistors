@@ -177,6 +177,12 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
         if (canvas && ctx) {
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
           lastRenderedTime = Date.now();
+          if (activeStream) {
+            const track = activeStream.getVideoTracks()[0];
+            if (track && typeof (track as any).requestFrame === 'function') {
+              (track as any).requestFrame();
+            }
+          }
         }
         isRendering = false;
         if (pendingFrameUrl) {

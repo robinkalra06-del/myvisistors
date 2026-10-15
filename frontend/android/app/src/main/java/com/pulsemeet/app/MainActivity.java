@@ -192,6 +192,15 @@ public class MainActivity extends BridgeActivity {
     public void startScreenCapture() {
         runOnUiThread(() -> {
             try {
+                // Pre-start foreground service so it is 100% active and running in foreground
+                // BEFORE the user approves the permission dialog (Android 14+ mandatory requirement)
+                Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ContextCompat.startForegroundService(this, serviceIntent);
+                } else {
+                    startService(serviceIntent);
+                }
+
                 if (mediaProjectionManager == null) {
                     mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
                 }
@@ -210,6 +219,10 @@ public class MainActivity extends BridgeActivity {
             if (resultCode == RESULT_OK && data != null) {
                 startCaptureSession(resultCode, data);
             } else {
+                try {
+                    Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
+                    stopService(serviceIntent);
+                } catch (Exception ignore) {}
                 sendJsEvent("window.__onAndroidScreenCaptureFailed && window.__onAndroidScreenCaptureFailed('Screen capture permission cancelled by user');");
             }
             return;
@@ -219,15 +232,7 @@ public class MainActivity extends BridgeActivity {
 
     private void startCaptureSession(int resultCode, Intent data) {
         try {
-            // 1. Start foreground service (mandatory for MediaProjection on Android 14+)
-            Intent serviceIntent = new Intent(this, ScreenCaptureService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ContextCompat.startForegroundService(this, serviceIntent);
-            } else {
-                startService(serviceIntent);
-            }
-
-            // 2. Start background thread
+            // Ensure background thread
             if (backgroundThread == null) {
                 backgroundThread = new HandlerThread("ScreenCaptureThread");
                 backgroundThread.start();
@@ -308,13 +313,23 @@ public class MainActivity extends BridgeActivity {
                     int pixelStride = planes[0].getPixelStride();
                     int rowStride = planes[0].getRowStride();
                     int rowPadding = rowStride - pixelStride * finalWidth;
+                    int bitmapWidth = finalWidth + (pixelStride > 0 ? rowPadding / pixelStride : 0);
 
                     Bitmap bitmap = Bitmap.createBitmap(
-                        finalWidth + rowPadding / pixelStride,
+                        bitmapWidth,
                         finalHeight,
                         Bitmap.Config.ARGB_8888
                     );
-                    bitmap.copyPixelsFromBuffer(buffer);
+
+                    int requiredBytes = bitmapWidth * finalHeight * 4;
+                    if (buffer.remaining() < requiredBytes) {
+                        ByteBuffer fullBuffer = ByteBuffer.allocateDirect(requiredBytes);
+                        fullBuffer.put(buffer);
+                        fullBuffer.rewind();
+                        bitmap.copyPixelsFromBuffer(fullBuffer);
+                    } else {
+                        bitmap.copyPixelsFromBuffer(buffer);
+                    }
                     image.close();
                     image = null;
 
@@ -325,7 +340,7 @@ public class MainActivity extends BridgeActivity {
                     }
 
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    finalBitmap.compress(Bitmap.CompressFormat.JPEG, 55, baos);
+                    finalBitmap.compress(Bitmap.CompressFormat.JPEG, 50, baos);
                     finalBitmap.recycle();
 
                     byte[] jpegBytes = baos.toByteArray();
@@ -334,6 +349,7 @@ public class MainActivity extends BridgeActivity {
                     sendJsFrame(base64);
 
                 } catch (Exception e) {
+                    android.util.Log.e("PulseMeetScreen", "Screen frame processing error: " + e.getMessage(), e);
                     if (image != null) {
                         try { image.close(); } catch (Exception ignore) {}
                     }
