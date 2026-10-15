@@ -216,6 +216,12 @@ export const setupMeetingSockets = (io: Server) => {
       });
     });
 
+    socket.on('signal:request-renegotiate', (data: { targetSocketId: string }) => {
+      io.to(data.targetSocketId).emit('signal:request-renegotiate', {
+        senderSocketId: socket.id,
+      });
+    });
+
     // 5. Track & Media Toggles
     socket.on('user:toggle-audio', (data: { isMuted: boolean }) => {
       if (!currentRoomCode) return;

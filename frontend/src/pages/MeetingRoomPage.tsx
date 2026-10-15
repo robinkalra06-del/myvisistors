@@ -55,18 +55,35 @@ import {
   openAndroidAppSettings,
 } from '../utils/androidScreenShare';
 
-// Standard public STUN servers for WebRTC
+// WebRTC STUN & TURN Relay Servers (Enables NAT/Firewall traversal for 4G/5G mobile carriers)
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: 'stun:stun.relay.metered.ca:80' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
-  iceCandidatePoolSize: 10,
+  iceCandidatePoolSize: 0,
 };
 
 export const MeetingRoomPage: React.FC = () => {
@@ -428,6 +445,23 @@ export const MeetingRoomPage: React.FC = () => {
       }
     });
 
+    socket.on('signal:request-renegotiate', async ({ senderSocketId }) => {
+      const pc = peerConnections.current.get(senderSocketId);
+      if (pc) {
+        try {
+          if ((pc as any).restartIce) (pc as any).restartIce();
+          if (pc.signalingState === 'stable') {
+            console.log(`[WebRTC] Peer ${senderSocketId} requested renegotiation, sending ICE restart offer...`);
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            socket.emit('signal:offer', { targetSocketId: senderSocketId, sdp: offer });
+          }
+        } catch (e) {
+          console.warn('[WebRTC] Error handling signal:request-renegotiate:', e);
+        }
+      }
+    });
+
     socket.on('signal:ice-candidate', async ({ senderSocketId, candidate }) => {
       const pc = peerConnections.current.get(senderSocketId);
       if (pc && pc.remoteDescription && pc.remoteDescription.type) {
@@ -570,6 +604,7 @@ export const MeetingRoomPage: React.FC = () => {
       socket.off('peer:joined');
       socket.off('signal:offer');
       socket.off('signal:answer');
+      socket.off('signal:request-renegotiate');
       socket.off('signal:ice-candidate');
       socket.off('peer:audio-changed');
       socket.off('peer:video-changed');
@@ -603,19 +638,35 @@ export const MeetingRoomPage: React.FC = () => {
     };
 
     // Connection state logging & auto ICE restart
-    pc.oniceconnectionstatechange = async () => {
+    let iceRecoveryTimer: any = null;
+    pc.oniceconnectionstatechange = () => {
       console.log(`[WebRTC] ICE state with ${targetSocketId}: ${pc.iceConnectionState}`);
-      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-        try {
-          if ((pc as any).restartIce) (pc as any).restartIce();
-          if (isInitiator && pc.signalingState === 'stable') {
-            console.log(`[WebRTC] Initiating ICE restart offer with ${targetSocketId}...`);
-            const offer = await pc.createOffer({ iceRestart: true });
-            await pc.setLocalDescription(offer);
-            socket.emit('signal:offer', { targetSocketId, sdp: offer });
-          }
-        } catch (e) {
-          console.warn('[WebRTC] ICE restart offer error:', e);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        if (iceRecoveryTimer) {
+          clearTimeout(iceRecoveryTimer);
+          iceRecoveryTimer = null;
+        }
+      } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        if (!iceRecoveryTimer) {
+          iceRecoveryTimer = setTimeout(async () => {
+            if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+              console.log(`[WebRTC] ICE still ${pc.iceConnectionState} with ${targetSocketId}, initiating recovery...`);
+              try {
+                if ((pc as any).restartIce) (pc as any).restartIce();
+                if (isInitiator) {
+                  if (pc.signalingState === 'stable') {
+                    const offer = await pc.createOffer({ iceRestart: true });
+                    await pc.setLocalDescription(offer);
+                    socket.emit('signal:offer', { targetSocketId, sdp: offer });
+                  }
+                } else {
+                  socket.emit('signal:request-renegotiate', { targetSocketId });
+                }
+              } catch (e) {
+                console.warn('[WebRTC] ICE recovery error:', e);
+              }
+            }
+          }, 2000);
         }
       }
     };
