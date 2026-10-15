@@ -176,9 +176,14 @@ export const MeetingRoomPage: React.FC = () => {
     return null;
   }, [peers]);
 
+  const cachedRemoteStreamRef = useRef<{ trackId: string; stream: MediaStream } | null>(null);
+
   // Robust stream resolver for presentation player (retrieves stream from peer or directly from WebRTC receivers)
   const remotePresenterStream = useMemo(() => {
-    if (!remotePresenter) return null;
+    if (!remotePresenter) {
+      cachedRemoteStreamRef.current = null;
+      return null;
+    }
     if (remotePresenter.stream) {
       const videoTracks = remotePresenter.stream.getVideoTracks();
       if (videoTracks.length > 0 && videoTracks.some((t) => t.readyState !== 'ended')) {
@@ -190,7 +195,12 @@ export const MeetingRoomPage: React.FC = () => {
       const receivers = pc.getReceivers();
       const videoTrack = receivers.map((r) => r.track).find((t) => t && t.kind === 'video' && t.readyState !== 'ended');
       if (videoTrack) {
-        return new MediaStream([videoTrack]);
+        if (cachedRemoteStreamRef.current?.trackId === videoTrack.id) {
+          return cachedRemoteStreamRef.current.stream;
+        }
+        const newStream = new MediaStream([videoTrack]);
+        cachedRemoteStreamRef.current = { trackId: videoTrack.id, stream: newStream };
+        return newStream;
       }
       const anyTracks = receivers.map((r) => r.track).filter(Boolean) as MediaStreamTrack[];
       if (anyTracks.length > 0) {
@@ -593,12 +603,20 @@ export const MeetingRoomPage: React.FC = () => {
     };
 
     // Connection state logging & auto ICE restart
-    pc.oniceconnectionstatechange = () => {
+    pc.oniceconnectionstatechange = async () => {
+      console.log(`[WebRTC] ICE state with ${targetSocketId}: ${pc.iceConnectionState}`);
       if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-        console.warn(`[WebRTC] ICE state with ${targetSocketId}: ${pc.iceConnectionState}`);
         try {
           if ((pc as any).restartIce) (pc as any).restartIce();
-        } catch (e) {}
+          if (isInitiator && pc.signalingState === 'stable') {
+            console.log(`[WebRTC] Initiating ICE restart offer with ${targetSocketId}...`);
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            socket.emit('signal:offer', { targetSocketId, sdp: offer });
+          }
+        } catch (e) {
+          console.warn('[WebRTC] ICE restart offer error:', e);
+        }
       }
     };
 
@@ -1437,14 +1455,18 @@ export const MeetingRoomPage: React.FC = () => {
             >
               Grant / Retry Access
             </button>
-            {isAndroidScreenShareSupported() && (
+            {isAndroidScreenShareSupported() ? (
               <button
                 onClick={openAndroidAppSettings}
                 className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold transition-colors"
               >
                 App Settings
               </button>
-            )}
+            ) : isMobileDevice ? (
+              <span className="text-[10px] text-amber-200/90 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-500/30">
+                Tap the lock/tune icon 🔒 in browser URL bar → Permissions → Allow Camera &amp; Mic
+              </span>
+            ) : null}
             <button
               onClick={() => setPermissionError(null)}
               className="text-amber-400 hover:text-white underline text-[11px]"
@@ -2517,13 +2539,17 @@ const RemoteVideoTile: React.FC<{
 
   useEffect(() => {
     if (peer.stream) {
-      if (videoRef.current) {
+      if (videoRef.current && videoRef.current.srcObject !== peer.stream) {
         videoRef.current.srcObject = peer.stream;
-        videoRef.current.play().catch((e) => console.warn('[Video] Remote play catch:', e));
+        videoRef.current.play().catch((e) => {
+          if (e.name !== 'AbortError') console.warn('[Video] Remote play catch:', e);
+        });
       }
-      if (audioRef.current) {
+      if (audioRef.current && audioRef.current.srcObject !== peer.stream) {
         audioRef.current.srcObject = peer.stream;
-        audioRef.current.play().catch((e) => console.warn('[Audio] Remote play catch:', e));
+        audioRef.current.play().catch((e) => {
+          if (e.name !== 'AbortError') console.warn('[Audio] Remote play catch:', e);
+        });
       }
 
       const videoTracks = peer.stream.getVideoTracks();
@@ -2600,16 +2626,20 @@ const RemoteScreenShareView: React.FC<{ stream?: MediaStream | null }> = ({ stre
       return;
     }
 
-    video.srcObject = stream;
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
 
     const playVideo = () => {
       video
         .play()
         .then(() => setIsPlaying(true))
         .catch((e) => {
-          console.warn('[ScreenShareView] Autoplay catch, retrying muted:', e);
-          video.muted = true;
-          video.play().then(() => setIsPlaying(true)).catch(() => {});
+          if (e.name !== 'AbortError') {
+            console.warn('[ScreenShareView] Autoplay catch, retrying muted:', e);
+            video.muted = true;
+            video.play().then(() => setIsPlaying(true)).catch(() => {});
+          }
         });
     };
 
