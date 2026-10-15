@@ -21,7 +21,8 @@ import { errorHandler, notFoundHandler } from './middlewares/error.middleware';
 const app = express();
 const server = http.createServer(app);
 
-const PORT = process.env.PORT || 5001;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 5001;
+const HOST = '0.0.0.0';
 const rawClientUrl = process.env.CLIENT_URL || 'https://pulsemeet-frontend-lj4y.onrender.com';
 const normalizedClientUrl = rawClientUrl.startsWith('http') ? rawClientUrl : `https://${rawClientUrl}`;
 
@@ -95,15 +96,23 @@ app.use('/api/subscriptions', subscriptionRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
+// Process-level safety logging
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught Exception:', err);
+});
+
 // Start Server
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`
   🚀 =============================================== 🚀
      PulseMeet Real-time Video Conferencing Server
+     Host:            ${HOST}
      Backend Port:    ${PORT}
      Client Origin:   ${rawClientUrl}
-     Health Check:    http://localhost:${PORT}/api/health
-     Database:        MySQL (meet_db)
+     Health Check:    http://${HOST}:${PORT}/api/health
   🚀 =============================================== 🚀
   `);
 });
