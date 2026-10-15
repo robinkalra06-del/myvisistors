@@ -1,0 +1,57 @@
+{
+  "name": "pulsemeet-desktop",
+  "version": "1.0.0",
+  "description": "PulseMeet High-Definition Video Conferencing & Presentation Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "build:mac": "electron-builder --mac dmg",
+    "build:win": "electron-builder --win nsis",
+    "build:all": "electron-builder -mw"
+  },
+  "author": "PulseMeet",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.pulsemeet.desktop",
+    "productName": "PulseMeet",
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.video",
+      "target": ["dmg"],
+      "icon": "icons/icon.png"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "icons/icon.png"
+    },
+    "dmg": {
+      "title": "PulseMeet Installer",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PulseMeet"
+    }
+  }
+}

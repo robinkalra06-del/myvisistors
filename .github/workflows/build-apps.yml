@@ -1,4 +1,4 @@
-name: Build PulseMeet Android APK
+name: Build PulseMeet Multiplatform Apps (Windows EXE, macOS DMG, Android APK)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-apk:
+  build-android:
     name: Build Android APK
     runs-on: ubuntu-latest
 
@@ -77,4 +77,60 @@ jobs:
         with:
           name: PulseMeet-Android-APK
           path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+  build-windows:
+    name: Build Windows PC (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Desktop Dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build Windows Executable (.exe)
+        working-directory: desktop
+        run: npm run build:win
+
+      - name: Upload Windows Setup Executable (.exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PulseMeet-Windows-Setup-EXE
+          path: desktop/release/*.exe
+          retention-days: 30
+
+  build-macos:
+    name: Build macOS (.dmg)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Desktop Dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build macOS DMG Installer
+        working-directory: desktop
+        run: npm run build:mac
+
+      - name: Upload macOS DMG Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PulseMeet-macOS-DMG
+          path: desktop/release/*.dmg
           retention-days: 30

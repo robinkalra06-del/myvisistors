@@ -6,6 +6,11 @@ node_modules/
 # Build Outputs
 dist/
 build/
+desktop/release/
+*.dmg
+*.exe
+*.apk
+*.blockmap
 
 # Environment Variables
 .env
