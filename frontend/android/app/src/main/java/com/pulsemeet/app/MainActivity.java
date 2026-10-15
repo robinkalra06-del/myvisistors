@@ -112,6 +112,7 @@ public class MainActivity extends BridgeActivity {
                 settings.setAllowFileAccess(true);
                 settings.setAllowContentAccess(true);
                 settings.setDatabaseEnabled(true);
+                settings.setOffscreenPreRaster(true);
 
                 // Add Javascript interface for Android Screen Share and Media Permissions
                 webView.addJavascriptInterface(new AndroidScreenShareBridge(this), "AndroidScreenShare");
@@ -282,8 +283,8 @@ public class MainActivity extends BridgeActivity {
             // Notify JS that capture has started
             sendJsEvent("window.__onAndroidScreenCaptureStarted && window.__onAndroidScreenCaptureStarted(" + finalWidth + "," + finalHeight + ");");
 
-            // 7. Rate-limit frames to ~18 fps (min 55ms between frames)
-            final long minFrameIntervalMs = 55;
+            // 7. Rate-limit frames to ~15 fps (min 66ms between frames) to ensure smooth IPC and low memory overhead
+            final long minFrameIntervalMs = 66;
             final AtomicLong lastFrameTimestamp = new AtomicLong(0);
 
             imageReader.setOnImageAvailableListener(reader -> {
@@ -324,7 +325,7 @@ public class MainActivity extends BridgeActivity {
                     }
 
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                    finalBitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos);
+                    finalBitmap.compress(Bitmap.CompressFormat.JPEG, 55, baos);
                     finalBitmap.recycle();
 
                     byte[] jpegBytes = baos.toByteArray();

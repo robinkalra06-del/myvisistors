@@ -195,18 +195,27 @@ export const MeetingRoomPage: React.FC = () => {
 
   const cachedRemoteStreamRef = useRef<{ trackId: string; stream: MediaStream } | null>(null);
 
-  // Robust stream resolver for presentation player (retrieves stream from peer or directly from WebRTC receivers)
+  // Robust stream resolver for presentation player (guarantees a stable, cached video track stream)
   const remotePresenterStream = useMemo(() => {
     if (!remotePresenter) {
       cachedRemoteStreamRef.current = null;
       return null;
     }
+
+    // 1. Check peer.stream for active video track
     if (remotePresenter.stream) {
-      const videoTracks = remotePresenter.stream.getVideoTracks();
-      if (videoTracks.length > 0 && videoTracks.some((t) => t.readyState !== 'ended')) {
-        return remotePresenter.stream;
+      const videoTrack = remotePresenter.stream.getVideoTracks().find((t) => t.readyState !== 'ended');
+      if (videoTrack) {
+        if (cachedRemoteStreamRef.current?.trackId === videoTrack.id) {
+          return cachedRemoteStreamRef.current.stream;
+        }
+        const newStream = new MediaStream([videoTrack]);
+        cachedRemoteStreamRef.current = { trackId: videoTrack.id, stream: newStream };
+        return newStream;
       }
     }
+
+    // 2. Check RTCRtpReceivers on peer connection for active video track
     const pc = peerConnections.current.get(remotePresenter.socketId);
     if (pc) {
       const receivers = pc.getReceivers();
@@ -219,12 +228,9 @@ export const MeetingRoomPage: React.FC = () => {
         cachedRemoteStreamRef.current = { trackId: videoTrack.id, stream: newStream };
         return newStream;
       }
-      const anyTracks = receivers.map((r) => r.track).filter(Boolean) as MediaStreamTrack[];
-      if (anyTracks.length > 0) {
-        return new MediaStream(anyTracks);
-      }
     }
-    return remotePresenter.stream || null;
+
+    return null;
   }, [remotePresenter, peers]);
 
 
@@ -500,7 +506,9 @@ export const MeetingRoomPage: React.FC = () => {
       let activeStream: MediaStream | null = null;
       if (pc) {
         const receivers = pc.getReceivers();
-        const tracks = receivers.map((r) => r.track).filter(Boolean) as MediaStreamTrack[];
+        const videoTrack = receivers.map((r) => r.track).find((t) => t && t.kind === 'video' && t.readyState !== 'ended');
+        const audioTrack = receivers.map((r) => r.track).find((t) => t && t.kind === 'audio' && t.readyState !== 'ended');
+        const tracks = [videoTrack, audioTrack].filter(Boolean) as MediaStreamTrack[];
         if (tracks.length > 0) {
           activeStream = new MediaStream(tracks);
         }
@@ -746,6 +754,25 @@ export const MeetingRoomPage: React.FC = () => {
     return pc;
   };
 
+  // Helper to renegotiate SDP offer with a target peer
+  const renegotiatePeer = async (targetSocketId: string, pc: RTCPeerConnection) => {
+    try {
+      if (pc.signalingState === 'closed') return;
+      if (pc.signalingState === 'stable') {
+        console.log(`[WebRTC] Initiating renegotiation offer for ${targetSocketId}...`);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('signal:offer', { targetSocketId, sdp: offer });
+      } else {
+        console.log(`[WebRTC] Peer ${targetSocketId} signalingState '${pc.signalingState}', requesting renegotiation via socket...`);
+        socket.emit('signal:request-renegotiate', { targetSocketId });
+      }
+    } catch (e) {
+      console.warn(`[WebRTC] Renegotiate peer ${targetSocketId} error:`, e);
+      socket.emit('signal:request-renegotiate', { targetSocketId });
+    }
+  };
+
   // Helper to broadcast new/replaced video track to all active peer connections
   const broadcastVideoTrack = async (track: MediaStreamTrack | null) => {
     for (const [targetSocketId, pc] of peerConnections.current.entries()) {
@@ -765,6 +792,10 @@ export const MeetingRoomPage: React.FC = () => {
             await videoTransceiver.sender.replaceTrack(track);
           }
         }
+
+        // CRITICAL: Always renegotiate SDP when replacing or broadcasting video track
+        // so that active SDP m-line updates to sendrecv and the remote peer immediately decodes the new stream
+        await renegotiatePeer(targetSocketId, pc);
       } catch (e) {
         console.warn(`Error broadcasting video track to ${targetSocketId}:`, e);
       }
@@ -995,6 +1026,9 @@ export const MeetingRoomPage: React.FC = () => {
         setIsVideoOff(false);
 
         const screenTrack = screenStream.getVideoTracks()[0];
+        if (screenTrack) {
+          screenTrack.contentHint = 'detail';
+        }
         await broadcastVideoTrack(screenTrack);
 
         screenTrack.onended = () => {
@@ -1038,6 +1072,9 @@ export const MeetingRoomPage: React.FC = () => {
       setIsVideoOff(false);
 
       const screenTrack = screenStream.getVideoTracks()[0];
+      if (screenTrack) {
+        screenTrack.contentHint = 'detail';
+      }
       await broadcastVideoTrack(screenTrack);
 
       screenTrack.onended = () => {
@@ -2636,10 +2673,10 @@ const RemoteVideoTile: React.FC<{
         autoPlay
         playsInline
         muted
-        className={`w-full h-full object-cover ${peer.isVideoOff ? 'opacity-0 pointer-events-none absolute' : 'block'}`}
+        className={`w-full h-full object-cover ${peer.isVideoOff || peer.isScreenSharing ? 'opacity-0 pointer-events-none absolute' : 'block'}`}
       />
 
-      {peer.isVideoOff && (
+      {(peer.isVideoOff || peer.isScreenSharing) && (
         <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-2xl font-bold shadow-lg">
           {(peer.name || 'P').charAt(0).toUpperCase()}
         </div>
@@ -2672,8 +2709,11 @@ const RemoteScreenShareView: React.FC<{ stream?: MediaStream | null }> = ({ stre
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !stream) {
+    if (!video) return;
+
+    if (!stream || stream.getVideoTracks().length === 0) {
       setIsPlaying(false);
+      video.srcObject = null;
       return;
     }
 
@@ -2681,7 +2721,7 @@ const RemoteScreenShareView: React.FC<{ stream?: MediaStream | null }> = ({ stre
       video.srcObject = stream;
     }
 
-    const playVideo = () => {
+    const tryPlay = () => {
       video
         .play()
         .then(() => setIsPlaying(true))
@@ -2694,26 +2734,27 @@ const RemoteScreenShareView: React.FC<{ stream?: MediaStream | null }> = ({ stre
         });
     };
 
-    playVideo();
+    tryPlay();
+
+    const onPlaying = () => setIsPlaying(true);
+    const onLoadedMetadata = () => tryPlay();
+
+    video.addEventListener('playing', onPlaying);
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
 
     const videoTracks = stream.getVideoTracks();
     videoTracks.forEach((track) => {
       track.onunmute = () => {
-        playVideo();
+        tryPlay();
       };
       track.onended = () => {
         setIsPlaying(false);
       };
     });
 
-    const handleLoadedMetadata = () => {
-      playVideo();
-    };
-
-    video.addEventListener('loadedmetadata', handleLoadedMetadata);
-
     return () => {
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
       videoTracks.forEach((track) => {
         track.onunmute = null;
         track.onended = null;

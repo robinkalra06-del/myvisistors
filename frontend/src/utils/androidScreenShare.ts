@@ -86,8 +86,8 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
     stopAndroidScreenCaptureStream();
 
     // 1. Create or retrieve DOM-attached canvas
-    // NOTE: In Chromium / Android WebView, HTMLCanvasElement.captureStream() MUST have opacity > 0
-    // and be within viewport bounds, otherwise Blink compositor marks it occluded and stops emitting frames to WebRTC!
+    // NOTE: In Chromium / Android WebView, canvas must NOT be occluded by opaque body elements.
+    // Placing it at top z-index with minimal dimensions ensures Blink compositor continuously paints frames to WebRTC.
     let canvas = document.getElementById('pulsemeet-screen-canvas') as HTMLCanvasElement;
     if (!canvas) {
       canvas = document.createElement('canvas');
@@ -95,12 +95,12 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
       canvas.width = 720;
       canvas.height = 1280;
       canvas.style.position = 'fixed';
-      canvas.style.top = '0';
-      canvas.style.left = '0';
-      canvas.style.width = '100vw';
-      canvas.style.height = '100vh';
-      canvas.style.zIndex = '-9999';
-      canvas.style.opacity = '0.01'; // Non-zero opacity forces compositor rendering
+      canvas.style.bottom = '0';
+      canvas.style.right = '0';
+      canvas.style.width = '4px';
+      canvas.style.height = '4px';
+      canvas.style.zIndex = '99999'; // Top of DOM layer tree - avoids occlusion optimization
+      canvas.style.opacity = '0.05';
       canvas.style.pointerEvents = 'none';
       canvas.style.visibility = 'visible';
       document.body.appendChild(canvas);
@@ -138,12 +138,13 @@ export const startAndroidScreenCaptureStream = (): Promise<MediaStream> => {
       }
 
       try {
-        // Capture stream from canvas at 20fps for smooth WebRTC transmission
-        const stream = (canvas as any).captureStream(20) as MediaStream;
+        // Capture stream from canvas at 15fps for balanced bandwidth and smoothness
+        const stream = (canvas as any).captureStream(15) as MediaStream;
         activeStream = stream;
 
         const track = stream.getVideoTracks()[0];
         if (track) {
+          track.contentHint = 'detail';
           track.enabled = true;
           track.onended = () => {
             console.log('[AndroidScreenShare] Screen track ended');
